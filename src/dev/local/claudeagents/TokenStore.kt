@@ -1,4 +1,4 @@
-package dev.local.clauderelay
+package dev.local.claudeagents
 
 import android.content.Context
 import android.security.keystore.KeyGenParameterSpec
@@ -19,8 +19,8 @@ import javax.crypto.spec.GCMParameterSpec
  * live in plain SharedPreferences.
  */
 object TokenStore {
-    private const val KEYSTORE_ALIAS = "clauderelay_token_key"
-    private const val PREFS = "clauderelay_prefs"
+    private const val KEYSTORE_ALIAS = "claudeagents_token_key"
+    private const val PREFS = "claudeagents_prefs"
     private const val TOKEN_FILE = "token.enc"
 
     private fun getOrCreateKey(): SecretKey {

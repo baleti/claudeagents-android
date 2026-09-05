@@ -1,4 +1,4 @@
-package dev.local.clauderelay
+package dev.local.claudeagents
 
 import android.content.Context
 import android.content.Intent
@@ -14,7 +14,7 @@ import android.util.Log
  * periodic tick retries it -- nothing is ever dropped.
  */
 object OutboxLogic {
-    const val ACTION_OUTBOX_CHANGED = "dev.local.clauderelay.OUTBOX_CHANGED"
+    const val ACTION_OUTBOX_CHANGED = "dev.local.claudeagents.OUTBOX_CHANGED"
     private const val TAG = "OutboxLogic"
 
     fun drainOutbox(context: Context): Boolean {

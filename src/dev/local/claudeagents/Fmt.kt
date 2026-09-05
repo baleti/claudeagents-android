@@ -1,4 +1,4 @@
-package dev.local.clauderelay
+package dev.local.claudeagents
 
 /** Compact "2m"/"3h"/"5d"/"2w" relative-age formatting -- same idea as the
  * desktop panel's fmtDuration (ClaudeUsageExpanded.qml) but collapsed to a

@@ -1,4 +1,4 @@
-package dev.local.clauderelay
+package dev.local.claudeagents
 
 data class ConversationRow(
     val id: String,

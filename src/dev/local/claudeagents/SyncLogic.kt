@@ -1,4 +1,4 @@
-package dev.local.clauderelay
+package dev.local.claudeagents
 
 import android.content.Context
 import android.content.Intent
@@ -12,7 +12,7 @@ import android.util.Log
  * the rsync-hourly substitute (see plan deviation #1).
  */
 object SyncLogic {
-    const val ACTION_SYNC_COMPLETE = "dev.local.clauderelay.SYNC_COMPLETE"
+    const val ACTION_SYNC_COMPLETE = "dev.local.claudeagents.SYNC_COMPLETE"
     private const val TAG = "SyncLogic"
 
     fun performSync(context: Context): Boolean {
@@ -66,7 +66,7 @@ object SyncLogic {
             Log.w(TAG, "sync failed (server unreachable): ${e.message}")
             false
         }
-        context.getSharedPreferences("clauderelay_prefs", Context.MODE_PRIVATE)
+        context.getSharedPreferences("claudeagents_prefs", Context.MODE_PRIVATE)
             .edit().putBoolean("last_sync_ok", ok).apply()
         context.sendBroadcast(Intent(ACTION_SYNC_COMPLETE).setPackage(context.packageName).putExtra("ok", ok))
         return ok

@@ -1,4 +1,4 @@
-package dev.local.clauderelay
+package dev.local.claudeagents
 
 import android.text.SpannableStringBuilder
 import android.text.style.ForegroundColorSpan

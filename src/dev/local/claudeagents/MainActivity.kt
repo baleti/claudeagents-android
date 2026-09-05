@@ -1,4 +1,4 @@
-package dev.local.clauderelay
+package dev.local.claudeagents
 
 import android.app.Activity
 import android.app.AlertDialog
@@ -118,7 +118,7 @@ class MainActivity : Activity() {
         title.setTextColor(Theme.onBackground)
         root.addView(title)
 
-        val hint = label("Paste the pairing token printed by claude-relay-daemon.py.")
+        val hint = label("Paste the pairing token printed by claude-agents-daemon.py.")
         hint.setPadding(0, dp(8), 0, dp(20))
         root.addView(hint)
 
@@ -174,7 +174,7 @@ class MainActivity : Activity() {
     private fun confirmRepair() {
         AlertDialog.Builder(this)
             .setTitle("Re-pair with server?")
-            .setMessage("Clears the current pairing token. You'll need to paste a new one from claude-relay-daemon.py.")
+            .setMessage("Clears the current pairing token. You'll need to paste a new one from claude-agents-daemon.py.")
             .setPositiveButton("Re-pair") { _, _ ->
                 TokenStore.clear(this)
                 showPairingView()
@@ -353,7 +353,7 @@ class MainActivity : Activity() {
     private fun refreshList() {
         val a = adapter ?: return
         a.items = db.listConversations()
-        val ok = getSharedPreferences("clauderelay_prefs", Context.MODE_PRIVATE)
+        val ok = getSharedPreferences("claudeagents_prefs", Context.MODE_PRIVATE)
             .getBoolean("last_sync_ok", true)
         offlineBanner?.let {
             if (ok) {

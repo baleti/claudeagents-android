@@ -1,4 +1,4 @@
-package dev.local.clauderelay
+package dev.local.claudeagents
 
 import android.graphics.Typeface
 import android.text.SpannableStringBuilder
@@ -20,7 +20,7 @@ sealed class MdSegment {
  * what Claude Code's own replies actually use: **bold**, `inline code`,
  * fenced ```code blocks```, "- "/"* " bullets, "# " headers, GFM pipe
  * tables, and the daemon's own "→ tool(args)" tool-call summary lines
- * (see claude-relay-daemon.py's summarize_content_blocks) styled
+ * (see claude-agents-daemon.py's summarize_content_blocks) styled
  * distinctly so a tool call reads as different from prose at a glance,
  * the way Claude Code's own CLI output does. Not a CommonMark
  * implementation -- nested/exotic markdown will render literally rather

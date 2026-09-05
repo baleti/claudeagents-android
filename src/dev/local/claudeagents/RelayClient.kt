@@ -1,4 +1,4 @@
-package dev.local.clauderelay
+package dev.local.claudeagents
 
 import android.content.Context
 import org.json.JSONArray
@@ -27,7 +27,7 @@ class RelayClient(context: Context) {
         val conn = url.openConnection() as HttpURLConnection
         try {
             conn.requestMethod = method
-            conn.setRequestProperty("X-Claude-Relay-Token", token)
+            conn.setRequestProperty("X-Claude-Agents-Token", token)
             conn.connectTimeout = 8000
             conn.readTimeout = readTimeoutMs
             if (body != null) {
@@ -56,7 +56,7 @@ class RelayClient(context: Context) {
         val conn = url.openConnection() as HttpURLConnection
         try {
             conn.requestMethod = method
-            conn.setRequestProperty("X-Claude-Relay-Token", token)
+            conn.setRequestProperty("X-Claude-Agents-Token", token)
             conn.connectTimeout = 8000
             conn.readTimeout = 15000
             val code = conn.responseCode

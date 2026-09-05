@@ -1,11 +1,11 @@
-package dev.local.clauderelay
+package dev.local.claudeagents
 
 import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 
-class Db(context: Context) : SQLiteOpenHelper(context, "clauderelay.db", null, 1) {
+class Db(context: Context) : SQLiteOpenHelper(context, "claudeagents.db", null, 1) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(

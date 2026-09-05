@@ -44,21 +44,21 @@ cd build
 "$D8" --output dex --min-api 29 $(find classes -name "*.class") "$KOTLIN_STDLIB"
 
 echo "=== assemble signed apk ==="
-cp base.apk clauderelay-unsigned.apk
+cp base.apk claudeagents-unsigned.apk
 cd dex
-zip -qr ../clauderelay-unsigned.apk classes.dex
+zip -qr ../claudeagents-unsigned.apk classes.dex
 cd ..
 
 if [ ! -f ../debug.keystore ]; then
   keytool -genkeypair -v -keystore ../debug.keystore \
     -storepass android -keypass android -alias androiddebugkey \
     -keyalg RSA -keysize 2048 -validity 10000 \
-    -dname "CN=Claude Relay Debug,O=local,C=US"
+    -dname "CN=Claude Agents Debug,O=local,C=US"
 fi
 
 "$APKSIGNER" sign --ks ../debug.keystore --ks-pass pass:android \
   --key-pass pass:android \
-  --out clauderelay-signed.apk clauderelay-unsigned.apk
+  --out claudeagents-signed.apk claudeagents-unsigned.apk
 
 echo "=== BUILD_OK ==="
-ls -la clauderelay-signed.apk
+ls -la claudeagents-signed.apk

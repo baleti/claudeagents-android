@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""claude-relay: HTTP bridge between this machine's tmux/claude sessions and
-the Claude Relay Android app, over a private tunnel (WireGuard or
+"""claude-agents: HTTP bridge between this machine's tmux/claude sessions and
+the Claude Agents Android app, over a private tunnel (WireGuard or
 equivalent) only.
 
 Security model:
   - socket bound to the tunnel interface IP only, never 0.0.0.0
   - peer IP must be in ALLOWED_SUBNET
-  - X-Claude-Relay-Token header must match the on-disk token (constant-time)
+  - X-Claude-Agents-Token header must match the on-disk token (constant-time)
   - any Origin header -> reject (no browser caller has legitimate business)
   - no CORS headers, ever
   - naive per-IP rate limit on mutating endpoints
@@ -31,7 +31,7 @@ from datetime import datetime
 from pathlib import Path
 
 HOME = Path.home()
-CONFIG_DIR = HOME / ".config" / "claude-relay"
+CONFIG_DIR = HOME / ".config" / "claude-agents"
 TOKEN_FILE = CONFIG_DIR / "token"
 LIVE_FILE = CONFIG_DIR / "live-sessions.json"
 QUEUE_DIR = CONFIG_DIR / "queue"
@@ -41,14 +41,14 @@ PROJECTS_DIR = HOME / ".claude" / "projects"
 def _env_or_fatal(name):
     val = os.environ.get(name)
     if not val:
-        sys.stderr.write(f"claude-relay: {name} must be set (see README) - refusing to start\n")
+        sys.stderr.write(f"claude-agents: {name} must be set (see README) - refusing to start\n")
         raise SystemExit(1)
     return val
 
 
-BIND_IP = _env_or_fatal("CLAUDE_RELAY_BIND_IP")
-PORT = int(os.environ.get("CLAUDE_RELAY_PORT", "8790"))
-ALLOWED_SUBNET = ipaddress.ip_network(_env_or_fatal("CLAUDE_RELAY_ALLOWED_SUBNET"))
+BIND_IP = _env_or_fatal("CLAUDE_AGENTS_BIND_IP")
+PORT = int(os.environ.get("CLAUDE_AGENTS_PORT", "8790"))
+ALLOWED_SUBNET = ipaddress.ip_network(_env_or_fatal("CLAUDE_AGENTS_ALLOWED_SUBNET"))
 
 ACCOUNT_DIRS = {"claude": HOME / ".claude", "claude2": HOME / ".claude2", "claude3": HOME / ".claude3"}
 
@@ -75,8 +75,8 @@ def load_or_create_token():
     tok = secrets.token_hex(32)
     TOKEN_FILE.write_text(tok + "\n")
     os.chmod(TOKEN_FILE, 0o600)
-    print(f"[claude-relay] generated pairing token: {tok}")
-    print(f"[claude-relay] (also saved to {TOKEN_FILE}, 0600)")
+    print(f"[claude-agents] generated pairing token: {tok}")
+    print(f"[claude-agents] (also saved to {TOKEN_FILE}, 0600)")
     return tok
 
 
@@ -465,7 +465,7 @@ def summarize_tool_use(name, tool_input):
     json.dumps of a Bash call's {"command": "...multi-line..."} escapes
     every real newline in the command to the literal two characters
     backslash-n -- confirmed live (2026-09-05) that this is exactly what
-    was rendering on-device as "...restart claude-relay.service\nsleep
+    was rendering on-device as "...restart claude-agents.service\nsleep
     2\n..." instead of an actual multi-line command. Pulling the real
     field out and wrapping it as a fenced ```bash block instead means it
     flows through the app's own Markdown.kt/SyntaxHighlight.kt pipeline
@@ -741,7 +741,7 @@ def rate_limited(ip, bucket, limit, window=10):
 # ---------------------------------------------------------------------------
 
 class Handler(http.server.BaseHTTPRequestHandler):
-    server_version = "claude-relay/1.0"
+    server_version = "claude-agents/1.0"
 
     def log_message(self, fmt, *args):
         pass  # we do our own logging below
@@ -780,7 +780,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             log(f"deny: Origin header present from {ip}")
             self._reject(403, "forbidden")
             return False
-        token = self.headers.get("X-Claude-Relay-Token", "")
+        token = self.headers.get("X-Claude-Agents-Token", "")
         if not hmac.compare_digest(token, TOKEN):
             log(f"deny: bad token from {ip}")
             self._reject(401, "unauthorized")
@@ -943,7 +943,7 @@ def main():
     t = threading.Thread(target=live_scan_loop, daemon=True)
     t.start()
     srv = Server((BIND_IP, PORT), Handler)
-    log(f"claude-relay listening on {BIND_IP}:{PORT}")
+    log(f"claude-agents listening on {BIND_IP}:{PORT}")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

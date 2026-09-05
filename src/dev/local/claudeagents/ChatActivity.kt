@@ -1,4 +1,4 @@
-package dev.local.clauderelay
+package dev.local.claudeagents
 
 import android.app.Activity
 import android.content.BroadcastReceiver

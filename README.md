@@ -1,4 +1,4 @@
-# Claude Relay
+# Claude Agents
 
 A mobile front-end for [Claude Code](https://claude.com/claude-code)
 sessions running on a remote machine: read the conversation, send new
@@ -16,7 +16,7 @@ Claude Code itself needing any network-facing mode of its own.
 
 Two halves, one repo:
 
-- **`server/`** — a small Python daemon (`claude-relay-daemon.py`, stdlib
+- **`server/`** — a small Python daemon (`claude-agents-daemon.py`, stdlib
   only) that runs on the same machine as your Claude Code sessions.
 - **App** (`AndroidManifest.xml`, `src/`) — the Android client. No Gradle,
   no Play Services, no third-party dependencies; built with the plain
@@ -41,20 +41,20 @@ security model, is in [docs/design.md](docs/design.md).
 ### Server
 
 ```sh
-CLAUDE_RELAY_BIND_IP=<your tunnel address> \
-CLAUDE_RELAY_ALLOWED_SUBNET=<your tunnel subnet, e.g. 10.0.0.0/24> \
-python3 server/claude-relay-daemon.py
+CLAUDE_AGENTS_BIND_IP=<your tunnel address> \
+CLAUDE_AGENTS_ALLOWED_SUBNET=<your tunnel subnet, e.g. 10.0.0.0/24> \
+python3 server/claude-agents-daemon.py
 ```
 
 It generates and prints a pairing token on first run (also saved to
-`~/.config/claude-relay/token`, mode 600). A systemd user-service template
-is at [server/claude-relay.service.example](server/claude-relay.service.example).
+`~/.config/claude-agents/token`, mode 600). A systemd user-service template
+is at [server/claude-agents.service.example](server/claude-agents.service.example).
 
 ### App
 
 ```sh
-bash build.sh                              # produces build/clauderelay-signed.apk
-adb install -r build/clauderelay-signed.apk
+bash build.sh                              # produces build/claudeagents-signed.apk
+adb install -r build/claudeagents-signed.apk
 ```
 
 On first launch, paste the pairing token, host, and port the daemon

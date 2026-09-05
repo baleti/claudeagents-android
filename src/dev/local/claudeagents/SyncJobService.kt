@@ -1,4 +1,4 @@
-package dev.local.clauderelay
+package dev.local.claudeagents
 
 import android.app.job.JobInfo
 import android.app.job.JobParameters
