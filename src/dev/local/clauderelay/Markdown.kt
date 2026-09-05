@@ -1,0 +1,160 @@
+package dev.local.clauderelay
+
+import android.graphics.Typeface
+import android.text.SpannableStringBuilder
+import android.text.style.BackgroundColorSpan
+import android.text.style.ForegroundColorSpan
+import android.text.style.RelativeSizeSpan
+import android.text.style.StyleSpan
+import android.text.style.TypefaceSpan
+
+sealed class MdSegment {
+    data class Text(val spanned: SpannableStringBuilder) : MdSegment()
+    data class Table(val header: List<String>, val rows: List<List<String>>) : MdSegment()
+}
+
+/**
+ * Minimal hand-rolled markdown -> Spannable renderer. No markdown library
+ * is reachable from this build (no dependency resolver -- see Theme.kt's
+ * own note on why this whole app is pure-platform), so this covers just
+ * what Claude Code's own replies actually use: **bold**, `inline code`,
+ * fenced ```code blocks```, "- "/"* " bullets, "# " headers, GFM pipe
+ * tables, and the daemon's own "→ tool(args)" tool-call summary lines
+ * (see claude-relay-daemon.py's summarize_content_blocks) styled
+ * distinctly so a tool call reads as different from prose at a glance,
+ * the way Claude Code's own CLI output does. Not a CommonMark
+ * implementation -- nested/exotic markdown will render literally rather
+ * than crash.
+ *
+ * Tables come out as a separate MdSegment.Table rather than inline
+ * Spannable text -- a plain TextView has no notion of a grid, so
+ * MessageAdapter renders each Table segment as a real TableLayout child
+ * view instead (reported: pipe tables were showing as raw "| a | b |"
+ * plain text before this).
+ */
+object Markdown {
+    // Table cells go through MessageAdapter's own TableLayout, not the
+    // line-based renderSegments loop -- exposed so a cell's **bold**/`code`
+    // still gets processed instead of showing the raw markdown characters
+    // (confirmed live 2026-09-05: cells rendered literal asterisks/backticks
+    // before this).
+    fun renderInline(text: String, codeBg: Int): SpannableStringBuilder {
+        val out = SpannableStringBuilder()
+        appendInline(out, text, codeBg)
+        return out
+    }
+
+    fun renderSegments(text: String, codeBg: Int, dimColor: Int): List<MdSegment> {
+        val segments = mutableListOf<MdSegment>()
+        val lines = text.split("\n")
+        var textBuf = SpannableStringBuilder()
+        var inFence = false
+        var i = 0
+
+        fun flushText() {
+            if (textBuf.isNotEmpty()) {
+                segments.add(MdSegment.Text(textBuf))
+                textBuf = SpannableStringBuilder()
+            }
+        }
+
+        while (i < lines.size) {
+            val line = lines[i]
+            if (!inFence && line.contains("|") && i + 1 < lines.size && isSeparatorRow(lines[i + 1])) {
+                flushText()
+                val header = splitRow(line)
+                val rows = mutableListOf<List<String>>()
+                i += 2
+                while (i < lines.size && lines[i].trim().let { it.isNotEmpty() && it.contains("|") }) {
+                    rows.add(splitRow(lines[i]))
+                    i++
+                }
+                segments.add(MdSegment.Table(header, rows))
+                continue
+            }
+            if (line.trim().startsWith("```")) {
+                inFence = !inFence
+            } else if (inFence) {
+                appendCodeLine(textBuf, line, codeBg)
+            } else when {
+                line.startsWith("→ ") -> appendDim(textBuf, line, dimColor)
+                line.trimStart().startsWith("# ") -> appendHeader(textBuf, line.trimStart().removePrefix("# "))
+                line.trimStart().startsWith("- ") || line.trimStart().startsWith("* ") -> {
+                    val indent = line.takeWhile { it == ' ' }
+                    textBuf.append(indent).append("• ")
+                    appendInline(textBuf, line.trimStart().removePrefix("- ").removePrefix("* "), codeBg)
+                }
+                else -> appendInline(textBuf, line, codeBg)
+            }
+            if (i != lines.lastIndex) textBuf.append("\n")
+            i++
+        }
+        flushText()
+        return segments
+    }
+
+    private fun isSeparatorRow(line: String): Boolean {
+        val t = line.trim()
+        if (!t.contains("|") || !t.contains("-")) return false
+        return t.all { it == '-' || it == ':' || it == '|' || it == ' ' }
+    }
+
+    private fun splitRow(line: String): List<String> {
+        var t = line.trim()
+        if (t.startsWith("|")) t = t.substring(1)
+        if (t.endsWith("|")) t = t.substring(0, t.length - 1)
+        return t.split("|").map { it.trim() }
+    }
+
+    private fun appendHeader(out: SpannableStringBuilder, text: String) {
+        val start = out.length
+        out.append(text)
+        out.setSpan(StyleSpan(Typeface.BOLD), start, out.length, 0)
+        out.setSpan(RelativeSizeSpan(1.1f), start, out.length, 0)
+    }
+
+    private fun appendDim(out: SpannableStringBuilder, text: String, dimColor: Int) {
+        val start = out.length
+        out.append(text)
+        out.setSpan(ForegroundColorSpan(dimColor), start, out.length, 0)
+        out.setSpan(StyleSpan(Typeface.ITALIC), start, out.length, 0)
+    }
+
+    private fun appendCodeLine(out: SpannableStringBuilder, text: String, codeBg: Int) {
+        val start = out.length
+        SyntaxHighlight.append(out, text)
+        out.setSpan(TypefaceSpan("monospace"), start, out.length, 0)
+        out.setSpan(BackgroundColorSpan(codeBg), start, out.length, 0)
+    }
+
+    // Inline **bold** and `code` spans within one line. Simple left-to-right
+    // scan, not a real tokenizer -- an odd number of ** or ` on a line just
+    // renders the trailing marker literally rather than guessing intent.
+    private fun appendInline(out: SpannableStringBuilder, text: String, codeBg: Int) {
+        var i = 0
+        while (i < text.length) {
+            if (text.startsWith("**", i)) {
+                val end = text.indexOf("**", i + 2)
+                if (end >= 0) {
+                    val start = out.length
+                    out.append(text.substring(i + 2, end))
+                    out.setSpan(StyleSpan(Typeface.BOLD), start, out.length, 0)
+                    i = end + 2
+                    continue
+                }
+            } else if (text[i] == '`') {
+                val end = text.indexOf('`', i + 1)
+                if (end >= 0) {
+                    val start = out.length
+                    SyntaxHighlight.append(out, text.substring(i + 1, end))
+                    out.setSpan(TypefaceSpan("monospace"), start, out.length, 0)
+                    out.setSpan(BackgroundColorSpan(codeBg), start, out.length, 0)
+                    i = end + 1
+                    continue
+                }
+            }
+            out.append(text[i])
+            i++
+        }
+    }
+}

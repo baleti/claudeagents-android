@@ -1,0 +1,138 @@
+package dev.local.clauderelay
+
+import android.content.Context
+import android.graphics.Color
+import android.graphics.Typeface
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.widget.BaseAdapter
+import android.widget.LinearLayout
+import android.widget.TextView
+
+/**
+ * Compact table, not stacked cards -- mirrors (a miniaturized version of)
+ * the desktop's ctrl+alt+c process table (ClaudeUsageExpanded.qml): one
+ * dense row per conversation, fixed-width columns, monospace. Column set
+ * here is deliberately smaller than the desktop's 9-column table (no tmux/
+ * hyprland/pid -- those describe a live *process*, which the phone has no
+ * business identifying down to the pid; "live" is already the daemon's own
+ * verdict). See ConversationAdapter.COLUMN_HEADER_TEXT / widths, which
+ * MainActivity's header row reuses so the two stay pixel-aligned.
+ */
+object ConversationColumns {
+    const val account = 26
+    const val lines = 46
+    const val ago = 40
+
+    // dir_key ("claude"/"claude2"/"claude3", see the daemon's ACCOUNT_DIRS)
+    // -> the same 1/2/3 numbering used everywhere else on this machine for
+    // the 3 accounts (the server's ~/.claude, ~/.claude2, ~/.claude3).
+    fun accountNumber(dirKey: String): String = when (dirKey) {
+        "claude" -> "1"
+        "claude2" -> "2"
+        "claude3" -> "3"
+        // Genuinely unrecoverable, not a bug: ~57 of this machine's oldest
+        // conversations predate the "bridge-session" transcript line the
+        // daemon reads to attribute an account (confirmed live 2026-09-05
+        // by checking how many lack it) -- a bare "?" read as broken, so
+        // this renders as a plain dash instead (see the dimmer color
+        // applied alongside it in ConversationAdapter.getView).
+        else -> "–"
+    }
+}
+
+class ConversationAdapter(private val context: Context) : BaseAdapter() {
+    var items: List<ConversationRow> = emptyList()
+        set(value) {
+            field = value
+            notifyDataSetChanged()
+        }
+
+    override fun getCount(): Int = items.size
+    override fun getItem(position: Int): ConversationRow = items[position]
+    override fun getItemId(position: Int): Long = items[position].id.hashCode().toLong()
+
+    private class Holder(
+        val dot: TextView, val account: TextView, val title: TextView,
+        val lines: TextView, val ago: TextView
+    )
+
+    override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+        val view: View
+        val holder: Holder
+        val dp = { v: Int -> Theme.dp(context, v) }
+        if (convertView == null) {
+            val row = LinearLayout(context)
+            row.orientation = LinearLayout.VERTICAL
+            row.background = Theme.rippleOn(Theme.roundedDrawable(Color.TRANSPARENT, context, radiusDp = 0))
+
+            val dataRow = LinearLayout(context)
+            dataRow.orientation = LinearLayout.HORIZONTAL
+            dataRow.gravity = Gravity.CENTER_VERTICAL
+            dataRow.setPadding(dp(12), dp(9), dp(12), dp(9))
+
+            val dot = TextView(context)
+            dot.text = "●"
+            dot.textSize = 11f
+            dataRow.addView(dot, LinearLayout.LayoutParams(dp(16), LinearLayout.LayoutParams.WRAP_CONTENT))
+
+            val account = TextView(context)
+            account.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL)
+            account.textSize = 11f
+            account.maxLines = 1
+            account.gravity = Gravity.CENTER
+            account.ellipsize = android.text.TextUtils.TruncateAt.END
+            dataRow.addView(account, LinearLayout.LayoutParams(dp(ConversationColumns.account), LinearLayout.LayoutParams.WRAP_CONTENT))
+
+            val title = TextView(context)
+            title.textSize = 13f
+            title.maxLines = 1
+            title.ellipsize = android.text.TextUtils.TruncateAt.END
+            val titleParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            titleParams.marginStart = dp(8)
+            titleParams.marginEnd = dp(8)
+            dataRow.addView(title, titleParams)
+
+            val lines = TextView(context)
+            lines.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL)
+            lines.textSize = 11f
+            lines.gravity = Gravity.END
+            dataRow.addView(lines, LinearLayout.LayoutParams(dp(ConversationColumns.lines), LinearLayout.LayoutParams.WRAP_CONTENT))
+
+            val ago = TextView(context)
+            ago.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL)
+            ago.textSize = 11f
+            ago.gravity = Gravity.END
+            val agoParams = LinearLayout.LayoutParams(dp(ConversationColumns.ago), LinearLayout.LayoutParams.WRAP_CONTENT)
+            agoParams.marginStart = dp(6)
+            dataRow.addView(ago, agoParams)
+
+            row.addView(dataRow)
+
+            val divider = View(context)
+            divider.setBackgroundColor(Theme.outlineVariant and 0x2AFFFFFF.toInt())
+            row.addView(divider, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
+
+            view = row
+            holder = Holder(dot, account, title, lines, ago)
+            view.tag = holder
+        } else {
+            view = convertView
+            holder = view.tag as Holder
+        }
+
+        val c = items[position]
+        holder.dot.setTextColor(if (c.isLive) Theme.live else Theme.muted and 0x66FFFFFF.toInt())
+        val isKnownAccount = c.account in setOf("claude", "claude2", "claude3")
+        holder.account.text = ConversationColumns.accountNumber(c.account)
+        holder.account.setTextColor(if (isKnownAccount) Theme.onSurfaceVariant else Theme.muted and 0x66FFFFFF.toInt())
+        holder.title.text = c.title
+        holder.title.setTextColor(Theme.onBackground)
+        holder.lines.text = c.lineCount.toString()
+        holder.lines.setTextColor(Theme.muted)
+        holder.ago.text = Fmt.ago(c.mtime)
+        holder.ago.setTextColor(Theme.muted)
+        return view
+    }
+}
