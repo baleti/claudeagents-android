@@ -117,6 +117,15 @@ class TtsPlaybackService : Service() {
 
     private var playThread: Thread? = null
     @Volatile private var playing = false
+    // True from startSession() until this session genuinely ends (idle
+    // fires, or stopAll()) -- unlike `playing`, stays true across a pause.
+    // Lets a controller that (re)binds after the launching Activity was
+    // recreated (or a completely new one) tell "nothing to resume" apart
+    // from "a session most likely still running in the background" without
+    // needing its own separate tracking -- this service already outlives
+    // any one Activity by design (foreground service + real notification),
+    // so it's the only thing that reliably knows.
+    @Volatile private var hasActiveSession = false
     @Volatile private var stopRequested = false
     @Volatile private var idleSignaled = true
     // Distinguishes "nothing left to play right now because the network is
@@ -254,6 +263,7 @@ class TtsPlaybackService : Service() {
 
     fun startSession(title: String) {
         sessionGeneration++ // invalidate any onQueueIdle already queued from a stop before this
+        hasActiveSession = true
         requestAudioFocus()
         currentTitle = title
         stopRequested = false
@@ -322,6 +332,17 @@ class TtsPlaybackService : Service() {
      * with this same value would resolve back to. Public so a caller can
      * build relative seek ("skip back/forward 15s") on top of seekTo(). */
     fun getPositionMs(): Long = estimatedPositionMs()
+
+    /** True from startSession() until the session genuinely ends (queue
+     * drains with nothing more coming, or stopAll()) -- stays true across
+     * a pause, unlike isPlaying(). A controller that just (re)bound uses
+     * this to tell whether there's a background session worth reflecting
+     * in its own UI at all. */
+    fun hasActiveSession(): Boolean = hasActiveSession
+
+    /** Real current playing/paused state, independent of which controller
+     * (if any) is currently bound -- same use as hasActiveSession(). */
+    fun isPlaying(): Boolean = playing
 
     /** 1.0 = normal. Takes effect immediately, including mid-sentence. */
     fun setPlaybackSpeed(speed: Float) {
@@ -395,6 +416,7 @@ class TtsPlaybackService : Service() {
         stopRequested = true
         setPlaying(false)
         sessionEnded = true
+        hasActiveSession = false
         seekGeneration++
         synchronized(lock) {
             allSentences.clear()
@@ -408,6 +430,14 @@ class TtsPlaybackService : Service() {
         updatePlaybackState(PlaybackState.STATE_STOPPED)
         try { stopForeground(STOP_FOREGROUND_REMOVE) } catch (_: Exception) {}
         abandonAudioFocus()
+        // Matches the explicit startForegroundService() a controller's
+        // start() now makes (see ReadAloudController) -- ends this
+        // component's "started" lifecycle so it doesn't linger
+        // indefinitely once nothing is bound either. Harmless if a client
+        // is still bound: the service instance stays alive for that
+        // binding regardless, this only clears the independent-of-binding
+        // "started" flag.
+        stopSelf()
         val myGen = sessionGeneration
         mainHandler.post { if (sessionGeneration == myGen) listener?.onQueueIdle() }
     }
@@ -444,6 +474,7 @@ class TtsPlaybackService : Service() {
                 // expected and fine (see sessionEnded's doc comment).
                 if (sessionEnded && !idleSignaled) {
                     idleSignaled = true
+                    hasActiveSession = false
                     abandonAudioFocus() // reading finished on its own - hand focus back
                     val myGen = sessionGeneration
                     mainHandler.post { if (sessionGeneration == myGen) listener?.onQueueIdle() }

@@ -554,9 +554,12 @@ class ChatActivity : Activity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        // unbind() also stops any in-progress read -- leaving the activity
-        // shouldn't leave the foreground playback service bound to a
-        // ServiceConnection that's about to become invalid.
+        // unbind() only detaches this Activity's ServiceConnection -- it no
+        // longer stops playback (asked for explicitly: "don't stop media
+        // playback when i escape from a conversation ... should still be
+        // playable in the background via normal android media control").
+        // The read, if one is in progress, keeps going in
+        // TtsPlaybackService's own foreground-service notification.
         readAloud.unbind()
     }
 

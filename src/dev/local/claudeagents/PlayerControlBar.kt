@@ -42,9 +42,15 @@ class PlayerControlBar(
             setOnClickListener { onClick() }
         }
 
-        val rewindButton = iconButton("⏪ 15") { onRewind() }
+        // Plain text, not the double-chevron emoji (⏪/⏩) originally here --
+        // those render as full-color pictorial glyphs on Android, clashing
+        // with the rest of this app's monochrome text/unicode-symbol style
+        // (▸/▾ for expand, ⬇ for download, ⋮ for overflow) -- reported
+        // live 2026-09-08: "make them simpler more consistent with overall
+        // design".
+        val rewindButton = iconButton("−15s") { onRewind() }
         playPauseButton = iconButton("⏸", primary = true) { onPlayPause() }
-        val forwardButton = iconButton("15 ⏩") { onForward() }
+        val forwardButton = iconButton("+15s") { onForward() }
         speedButton = iconButton("1x") { onSpeedClick(speedButton) }
 
         view = LinearLayout(context).apply {

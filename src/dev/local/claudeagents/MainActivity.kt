@@ -190,13 +190,9 @@ class MainActivity : Activity() {
     }
 
     private fun showOverflowMenu(anchor: View) {
-        val popup = android.widget.PopupMenu(this, anchor)
-        popup.menu.add("Read aloud settings")
-        popup.setOnMenuItemClickListener {
+        Theme.showMenu(this, anchor, listOf("Read aloud settings")) {
             startActivity(Intent(this, TtsSettingsActivity::class.java))
-            true
         }
-        popup.show()
     }
 
     private fun dp(v: Int): Int = Theme.dp(this, v)

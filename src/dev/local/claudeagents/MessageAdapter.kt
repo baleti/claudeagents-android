@@ -121,16 +121,18 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
             }
         )
         holder.outer.gravity = if (isUser) Gravity.END else Gravity.START
-        holder.bubble.isClickable = false
-        holder.bubble.setOnClickListener(null)
-        // Copy/Read-aloud menu -- only on a plain prose row (user/assistant/
-        // error text), not a tool-call bundle (those already use long-press-
-        // adjacent taps to expand/collapse individual items -- a second,
-        // competing long-press gesture on the same bubble would be
-        // confusing) and not an attachment (nothing textual worth reading).
+        // Copy/Read-aloud menu -- a single tap (asked for explicitly:
+        // "should appear when i tap any message once rather than long
+        // press" -- was long-press until 2026-09-08) -- only on a plain
+        // prose row (user/assistant/error text), not a tool-call bundle
+        // (those already use a tap on each item to expand/collapse it
+        // individually -- a second, competing tap gesture on the same
+        // bubble would be confusing) and not an attachment (nothing
+        // textual worth reading, and its own Download text has its own
+        // tap target).
         val wantsMessageMenu = !isBundle && !isAttachment && m.text.isNotBlank()
-        holder.bubble.isLongClickable = wantsMessageMenu
-        holder.bubble.setOnLongClickListener(if (wantsMessageMenu) { v -> showMessageMenu(v, m); true } else null)
+        holder.bubble.isClickable = wantsMessageMenu
+        holder.bubble.setOnClickListener(if (wantsMessageMenu) { v -> showMessageMenu(v, m) } else null)
 
         holder.role.text = when {
             isError -> when (m.errorType) {
@@ -205,19 +207,18 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
         }
 
         // A selectable TextView (see plainTextView's setTextIsSelectable)
-        // handles its own long-press internally to start text selection --
-        // that consumes the gesture before it ever reaches a parent's
-        // OnLongClickListener (confirmed live: long-pressing message text
-        // opened the platform's Copy/Share/Select-all popup instead of this
-        // menu). Wiring the same listener directly onto each content
-        // TextView fixes it: TextView.performLongClick() checks a view's
-        // own custom listener first and only falls through to the built-in
-        // selection UI if that listener didn't consume the event.
+        // handles its own touch stream internally (cursor placement, then
+        // long-press-to-select) -- that consumes the gesture before it
+        // ever reaches a parent's OnClickListener (confirmed live: tapping
+        // message text did nothing, and long-pressing it opened the
+        // platform's Copy/Share/Select-all popup, in both cases because
+        // only the bubble had a listener). Wiring the same listener
+        // directly onto each content TextView fixes it the same way.
         if (wantsMessageMenu) {
             for (i in 0 until holder.body.childCount) {
                 val child = holder.body.getChildAt(i)
-                child.isLongClickable = true
-                child.setOnLongClickListener { v -> showMessageMenu(v, m); true }
+                child.isClickable = true
+                child.setOnClickListener { v -> showMessageMenu(v, m) }
             }
         }
 
@@ -229,17 +230,12 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
 
     private fun showMessageMenu(anchor: View, m: ChatDisplayRow) {
         val activity = context as? ChatActivity ?: return
-        val popup = android.widget.PopupMenu(context, anchor)
-        popup.menu.add("Copy message")
-        popup.menu.add("Read aloud from here")
-        popup.setOnMenuItemClickListener { item ->
-            when (item.title) {
+        Theme.showMenu(context, anchor, listOf("Copy message", "Read aloud from here")) { choice ->
+            when (choice) {
                 "Copy message" -> activity.copyMessage(m.text)
                 "Read aloud from here" -> m.id?.let { activity.readAloudFrom(it) }
             }
-            true
         }
-        popup.show()
     }
 
     // Headline shown for one tool item when its bundle is collapsed. Most
@@ -468,7 +464,12 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
         val tv = TextView(context)
         tv.textSize = 14f
         tv.setLineSpacing(dp(2).toFloat(), 1f)
-        tv.setTextIsSelectable(true)
+        // NOT selectable (was true) -- a selectable TextView inside a
+        // ListView row needs a first tap just to gain focus before its own
+        // click listener ever fires, so opening the tap-menu took two taps
+        // (reported live 2026-09-08). "Copy message" already covers
+        // copying a whole message; native partial-text selection inside a
+        // bubble is the trade-off for single-tap working reliably.
         tv.setPadding(0, dp(3), 0, 0)
         tv.setTextColor(Theme.onBackground)
         tv.maxWidth = maxWidth

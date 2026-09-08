@@ -63,6 +63,24 @@ class ReadAloudController(
             ttsService = svc
             svc.setListener(playbackListener)
             bound = true
+            // A previous ChatActivity instance may have started a session
+            // and then gone away (back button, app switch) without
+            // stopping it -- the service itself, a real foreground service
+            // with its own notification, kept right on playing in the
+            // background exactly as intended (asked for explicitly: "don't
+            // stop media playback when i escape from a conversation").
+            // This fresh controller instance's own `active` starts false
+            // regardless, so without this check a still-playing session
+            // would show no player bar at all until some new event
+            // happened to fire onPlayingChanged.
+            if (svc.hasActiveSession()) {
+                active = true
+                val playingNow = svc.isPlaying()
+                mainHandler.post {
+                    onStateChanged.invoke(true)
+                    onPlayingChanged.invoke(playingNow)
+                }
+            }
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -75,8 +93,14 @@ class ReadAloudController(
         context.bindService(Intent(context, TtsPlaybackService::class.java), connection, Context.BIND_AUTO_CREATE)
     }
 
+    /** Detaches this controller from the playback service WITHOUT stopping
+     * playback -- TtsPlaybackService is a real foreground service with its
+     * own MediaSession/notification specifically so a read continues
+     * playing (and stays controllable from the notification/lock screen)
+     * after the launching Activity is gone, the same way any other media
+     * app behaves. Call stop() explicitly first if leaving really should
+     * end the read (this controller never does that on its own). */
     fun unbind() {
-        stop()
         if (bound) {
             try { context.unbindService(connection) } catch (_: Exception) {}
             bound = false
@@ -100,6 +124,17 @@ class ReadAloudController(
             onStateChanged.invoke(false)
             return
         }
+        // Explicitly START the service, not just bind it -- confirmed live
+        // (2026-09-08) that a bind-only service is destroyed the instant
+        // its last client unbinds, REGARDLESS of startForeground() having
+        // already been called: startForeground() elevates process
+        // priority/shows the notification while the service is alive, but
+        // it does not by itself keep the component's lifecycle independent
+        // of bindings. Without this, "don't stop playback when I leave the
+        // conversation" silently did nothing -- the notification and
+        // service both vanished the moment ChatActivity.onDestroy() ran
+        // unbind(), even with the stop() call already removed from it.
+        context.startForegroundService(Intent(context, TtsPlaybackService::class.java))
         svc.startSession(title)
         svc.setPlaybackSpeed(currentSpeed)
         streamText(text, svc)
