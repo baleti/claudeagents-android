@@ -16,4 +16,14 @@ object Fmt {
             else -> "${s / (30 * 86400)}mo"
         }
     }
+
+    // Same idea as the desktop panel's fmtTokens (ClaudeUsageExpanded.qml):
+    // 135242 -> "135k", 850 -> "850", null (no assistant usage recorded
+    // yet, e.g. a brand-new conversation) -> "--".
+    fun tokens(n: Int?): String {
+        if (n == null) return "--"
+        if (n < 1000) return n.toString()
+        val k = n / 1000.0
+        return (if (n < 10000) "%.1f".format(k) else k.toInt().toString()) + "k"
+    }
 }

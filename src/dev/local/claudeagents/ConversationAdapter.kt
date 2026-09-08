@@ -22,7 +22,7 @@ import android.widget.TextView
  */
 object ConversationColumns {
     const val account = 26
-    const val lines = 46
+    const val tokens = 46
     const val ago = 40
 
     // dir_key ("claude"/"claude2"/"claude3", see the daemon's ACCOUNT_DIRS)
@@ -55,7 +55,7 @@ class ConversationAdapter(private val context: Context) : BaseAdapter() {
 
     private class Holder(
         val dot: TextView, val account: TextView, val title: TextView,
-        val lines: TextView, val ago: TextView
+        val tokens: TextView, val ago: TextView
     )
 
     override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
@@ -94,11 +94,11 @@ class ConversationAdapter(private val context: Context) : BaseAdapter() {
             titleParams.marginEnd = dp(8)
             dataRow.addView(title, titleParams)
 
-            val lines = TextView(context)
-            lines.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL)
-            lines.textSize = 11f
-            lines.gravity = Gravity.END
-            dataRow.addView(lines, LinearLayout.LayoutParams(dp(ConversationColumns.lines), LinearLayout.LayoutParams.WRAP_CONTENT))
+            val tokens = TextView(context)
+            tokens.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL)
+            tokens.textSize = 11f
+            tokens.gravity = Gravity.END
+            dataRow.addView(tokens, LinearLayout.LayoutParams(dp(ConversationColumns.tokens), LinearLayout.LayoutParams.WRAP_CONTENT))
 
             val ago = TextView(context)
             ago.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL)
@@ -115,7 +115,7 @@ class ConversationAdapter(private val context: Context) : BaseAdapter() {
             row.addView(divider, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
 
             view = row
-            holder = Holder(dot, account, title, lines, ago)
+            holder = Holder(dot, account, title, tokens, ago)
             view.tag = holder
         } else {
             view = convertView
@@ -129,8 +129,8 @@ class ConversationAdapter(private val context: Context) : BaseAdapter() {
         holder.account.setTextColor(if (isKnownAccount) Theme.onSurfaceVariant else Theme.muted and 0x66FFFFFF.toInt())
         holder.title.text = c.title
         holder.title.setTextColor(Theme.onBackground)
-        holder.lines.text = c.lineCount.toString()
-        holder.lines.setTextColor(Theme.muted)
+        holder.tokens.text = Fmt.tokens(c.tokens)
+        holder.tokens.setTextColor(Theme.muted)
         holder.ago.text = Fmt.ago(c.mtime)
         holder.ago.setTextColor(Theme.muted)
         return view

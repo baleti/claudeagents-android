@@ -1,11 +1,17 @@
 package dev.local.claudeagents
 
 import android.content.Context
+import android.graphics.BitmapFactory
+import android.graphics.Color
 import android.graphics.Typeface
+import android.text.SpannableStringBuilder
+import android.text.TextUtils
+import android.text.style.ForegroundColorSpan
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.widget.BaseAdapter
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TableLayout
 import android.widget.TableRow
@@ -18,15 +24,23 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
             notifyDataSetChanged()
         }
 
+    // Which individual tool items (inside a bundle) are currently expanded,
+    // keyed by ToolCallItem.id -- the transcript line number, stable across
+    // notifyDataSetChanged()/view recycling unlike position (asked for
+    // explicitly: "when it just runs commands collapse these messages by
+    // default and let user tap on them so they get shown if needed").
+    private val expandedIds = mutableSetOf<String>()
+
     override fun getCount(): Int = items.size
     override fun getItem(position: Int): ChatDisplayRow = items[position]
     override fun getItemId(position: Int): Long = position.toLong()
 
     // "body" holds a variable number/kind of children per message (plain
     // text segments interleaved with real TableLayout grids for any GFM
-    // pipe tables -- see Markdown.kt's MdSegment), so unlike role/status
-    // it can't be a single recycled TextView; it's cleared and rebuilt
-    // fresh on every bind instead. Cheap enough for a chat-sized list.
+    // pipe tables -- see Markdown.kt's MdSegment; or, for a tool bundle,
+    // one sub-container per tool item), so unlike role/status it can't be a
+    // single recycled TextView; it's cleared and rebuilt fresh on every
+    // bind instead. Cheap enough for a chat-sized list.
     private class Holder(val outer: LinearLayout, val bubble: LinearLayout, val role: TextView, val body: LinearLayout, val status: TextView)
 
     override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
@@ -67,33 +81,143 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
         }
 
         val m = items[position]
-        val isUser = m.role == "user"
+        val items0 = m.toolItems
+        val isBundle = items0 != null
+        val isAttachment = m.attachment != null
+        // "user" is a real human-typed message. A tool result is *also*
+        // wire-formatted as a `type: "user"` transcript line (see the
+        // daemon's parse_transcript_line) but reclassified server-side to
+        // role "tool_result" -- it's the output of a Bash/Read/etc call
+        // being fed back to Claude, not something the human said, and
+        // rendering it as a "YOU" bubble read as exactly backwards
+        // (reported live 2026-09-05: a daemon status printout the model
+        // itself produced was showing as if the user had typed it).
+        val isUser = !isBundle && m.role == "user"
+        // Claude Code's own synthetic error turn (see the daemon's
+        // parse_transcript_line / RelayClient.errorType) -- used to render
+        // as an ordinary CLAUDE bubble reading "Prompt is too long" with no
+        // indication anything unusual had happened or that anything could
+        // be done about it (reported live 2026-09-07/08). Rendered instead
+        // as a distinct warning bubble, with a one-tap Compact action for
+        // the context-limit case specifically.
+        val isError = !isBundle && m.role == "error"
         val maxWidth = (context.resources.displayMetrics.widthPixels * 0.86).toInt()
 
         holder.bubble.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         holder.bubble.minimumWidth = 0
         holder.bubble.background = Theme.roundedDrawable(
-            if (isUser) Theme.surfaceContainer else Theme.surface,
+            when {
+                isError -> Theme.errorContainer
+                isUser -> Theme.surfaceContainer
+                isBundle -> Theme.bg
+                else -> Theme.surface
+            },
             context,
-            strokeColor = if (isUser) Theme.primary and 0x55FFFFFF.toInt() else Theme.outlineVariant
+            strokeColor = when {
+                isError -> Theme.error
+                isUser -> Theme.primary and 0x55FFFFFF.toInt()
+                isBundle -> Theme.outlineVariant and 0x88FFFFFF.toInt()
+                else -> Theme.outlineVariant
+            }
         )
         holder.outer.gravity = if (isUser) Gravity.END else Gravity.START
+        holder.bubble.isClickable = false
+        holder.bubble.setOnClickListener(null)
+        // Copy/Read-aloud menu -- only on a plain prose row (user/assistant/
+        // error text), not a tool-call bundle (those already use long-press-
+        // adjacent taps to expand/collapse individual items -- a second,
+        // competing long-press gesture on the same bubble would be
+        // confusing) and not an attachment (nothing textual worth reading).
+        val wantsMessageMenu = !isBundle && !isAttachment && m.text.isNotBlank()
+        holder.bubble.isLongClickable = wantsMessageMenu
+        holder.bubble.setOnLongClickListener(if (wantsMessageMenu) { v -> showMessageMenu(v, m); true } else null)
 
-        holder.role.text = if (isUser) "YOU" else "CLAUDE"
-        holder.role.setTextColor(if (isUser) Theme.primary else Theme.secondary)
+        holder.role.text = when {
+            isError -> when (m.errorType) {
+                "context_limit" -> "CONTEXT LIMIT"
+                "rate_limit" -> "RATE LIMIT"
+                else -> "ERROR"
+            }
+            isUser -> "YOU"
+            isBundle -> when {
+                items0.size > 1 -> "TOOLS (${items0.size})"
+                items0[0].isStandaloneResult -> "RESULT"
+                else -> "TOOL"
+            }
+            else -> "CLAUDE"
+        }
+        holder.role.setTextColor(when {
+            isError -> Theme.error
+            isUser -> Theme.primary
+            isBundle -> Theme.muted
+            else -> Theme.secondary
+        })
 
         holder.body.removeAllViews()
-        if (isUser) {
+        if (isError) {
+            val tv = plainTextView(m.text, maxWidth)
+            tv.setTextColor(Theme.onBackground)
+            holder.body.addView(tv)
+        } else if (isAttachment) {
+            holder.body.addView(buildAttachmentView(m, maxWidth))
+        } else if (isBundle) {
+            items0.forEachIndexed { idx, item ->
+                val key = item.id
+                val expanded = expandedIds.contains(key)
+                val itemContainer = LinearLayout(context)
+                itemContainer.orientation = LinearLayout.VERTICAL
+                if (idx > 0) itemContainer.setPadding(0, dp(6), 0, 0)
+                itemContainer.addView(buildItemHeadlineRow(item, expanded, maxWidth))
+                // Only the paired *result* is genuinely separate content
+                // from what the headline row already shows -- expanding
+                // that row itself now reveals the full call (or, for a
+                // standalone result, the full result), so it's never
+                // rendered a second time here (was showing the full text
+                // twice: once truncated as the headline, once again in
+                // full right below it).
+                if (expanded && !item.isStandaloneResult && item.resultText != null) {
+                    val tv = plainTextView(renderResultText(item.resultText), maxWidth)
+                    tv.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL)
+                    tv.textSize = 12f
+                    tv.setTextColor(Theme.onSurfaceVariant)
+                    tv.setPadding(0, dp(4), 0, 0)
+                    itemContainer.addView(tv)
+                }
+                itemContainer.isClickable = true
+                itemContainer.background = Theme.rippleOn(Theme.roundedDrawable(Color.TRANSPARENT, context, radiusDp = 4))
+                itemContainer.setOnClickListener {
+                    if (expanded) expandedIds.remove(key) else expandedIds.add(key)
+                    notifyDataSetChanged()
+                }
+                holder.body.addView(itemContainer)
+            }
+        } else if (isUser) {
             holder.body.addView(plainTextView(m.text, maxWidth))
         } else {
-            for (seg in Markdown.renderSegments(m.text, codeBg = Theme.surfaceContainer, dimColor = Theme.muted)) {
+            for (seg in Markdown.renderSegments(m.text, dimColor = Theme.muted)) {
                 when (seg) {
                     is MdSegment.Text -> if (seg.spanned.isNotEmpty()) {
-                        val tv = plainTextView(seg.spanned, maxWidth)
-                        holder.body.addView(tv)
+                        holder.body.addView(plainTextView(seg.spanned, maxWidth))
                     }
                     is MdSegment.Table -> holder.body.addView(buildTableView(seg))
                 }
+            }
+        }
+
+        // A selectable TextView (see plainTextView's setTextIsSelectable)
+        // handles its own long-press internally to start text selection --
+        // that consumes the gesture before it ever reaches a parent's
+        // OnLongClickListener (confirmed live: long-pressing message text
+        // opened the platform's Copy/Share/Select-all popup instead of this
+        // menu). Wiring the same listener directly onto each content
+        // TextView fixes it: TextView.performLongClick() checks a view's
+        // own custom listener first and only falls through to the built-in
+        // selection UI if that listener didn't consume the event.
+        if (wantsMessageMenu) {
+            for (i in 0 until holder.body.childCount) {
+                val child = holder.body.getChildAt(i)
+                child.isLongClickable = true
+                child.setOnLongClickListener { v -> showMessageMenu(v, m); true }
             }
         }
 
@@ -101,6 +225,242 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
         holder.status.setTextColor(Theme.muted)
         holder.status.visibility = if (m.status == null) View.GONE else View.VISIBLE
         return view
+    }
+
+    private fun showMessageMenu(anchor: View, m: ChatDisplayRow) {
+        val activity = context as? ChatActivity ?: return
+        val popup = android.widget.PopupMenu(context, anchor)
+        popup.menu.add("Copy message")
+        popup.menu.add("Read aloud from here")
+        popup.setOnMenuItemClickListener { item ->
+            when (item.title) {
+                "Copy message" -> activity.copyMessage(m.text)
+                "Read aloud from here" -> m.id?.let { activity.readAloudFrom(it) }
+            }
+            true
+        }
+        popup.show()
+    }
+
+    // Headline shown for one tool item when its bundle is collapsed. Most
+    // tools already put the useful bit inline in the first line ("→
+    // Read(`path`)" etc); Bash is the exception -- its command sits on
+    // *line 3* of the fenced ```bash block (see the daemon's
+    // summarize_tool_use), so a plain first-line grab would just show
+    // "→ Bash" with no hint what it ran. Pull the actual first command
+    // line out instead (asked for explicitly: "when bash is called show
+    // at least first line or something in the collapsed view").
+    private fun headlineFor(item: ToolCallItem): CharSequence {
+        val headline = when {
+            item.isStandaloneResult ->
+                "[result] " + (item.callText.lineSequence().firstOrNull() ?: "")
+            item.callText.startsWith("→ Bash") -> {
+                val cmdLine = item.callText.lineSequence().drop(2).firstOrNull { it.isNotBlank() }?.trim()
+                if (cmdLine != null) "→ Bash: $cmdLine" else "→ Bash"
+            }
+            else -> item.callText.lineSequence().firstOrNull() ?: item.callText
+        }
+        return Markdown.renderInline(headline)
+    }
+
+    // The one line/block that toggles between collapsed and expanded for
+    // one tool item inside a bundle, plus a trailing "<N>L ▸/▾" chip
+    // (asked for explicitly: "add + - lines changed next to the collapsed
+    // views"). Collapsed shows a single truncated line; expanded shows the
+    // *same* text in full instead of appending a second copy below it
+    // (reported: "Edit (/path/to/file)" was appearing once truncated, then
+    // again in full right underneath -- confusing). Tapping this item's
+    // own container toggles just this item, not the whole bundle.
+    private fun buildItemHeadlineRow(item: ToolCallItem, expanded: Boolean, maxWidth: Int): View {
+        val dp = { v: Int -> Theme.dp(context, v) }
+        val row = LinearLayout(context)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = if (expanded) Gravity.TOP else Gravity.CENTER_VERTICAL
+
+        val label = TextView(context)
+        label.maxWidth = maxWidth
+        if (expanded) {
+            label.maxLines = Int.MAX_VALUE
+            label.ellipsize = null
+            label.textSize = 12f
+            label.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL)
+            label.setTextColor(Theme.onSurfaceVariant)
+            label.text = if (item.isStandaloneResult) renderResultText(item.callText) else fullCallText(item.callText)
+        } else {
+            label.maxLines = 1
+            label.ellipsize = TextUtils.TruncateAt.END
+            label.textSize = 13f
+            label.setTypeface(Typeface.MONOSPACE, Typeface.ITALIC)
+            label.setTextColor(Theme.muted)
+            label.text = headlineFor(item)
+        }
+        row.addView(label, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+
+        val resultBody = item.resultText ?: if (item.isStandaloneResult) item.callText else null
+        val chip = TextView(context)
+        chip.textSize = 11f
+        chip.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL)
+        chip.setTextColor(Theme.muted)
+        chip.setPadding(dp(6), 0, 0, 0)
+        chip.text = buildString {
+            if (resultBody != null) {
+                append(resultBody.count { it == '\n' } + 1)
+                append("L ")
+            }
+            append(if (expanded) "▾" else "▸")
+        }
+        row.addView(chip)
+        return row
+    }
+
+    // Full (untruncated) call text, syntax-highlighted the same way a
+    // normal Claude message is -- a tool call is plain text apart from
+    // Bash's ```bash fence (see summarize_tool_use), so this only ever
+    // produces MdSegment.Text in practice; Table is handled anyway since
+    // Markdown.renderSegments is the same general-purpose pipeline.
+    private fun fullCallText(callText: String): CharSequence {
+        val out = SpannableStringBuilder()
+        for (seg in Markdown.renderSegments(callText, dimColor = Theme.muted)) {
+            if (seg is MdSegment.Text) {
+                if (out.isNotEmpty()) out.append("\n")
+                out.append(seg.spanned)
+            }
+        }
+        return out
+    }
+
+    // A tool result was rendering as a flat, uncolored wall of text --
+    // unlike a call, results never went through Markdown/SyntaxHighlight
+    // at all (reported: reading a .kt file showed every line prefixed with
+    // its `cat -n`-style line number and no syntax coloring). Applied
+    // per-line here rather than through Markdown.renderSegments since a
+    // result isn't markdown -- it's raw tool output (file contents, command
+    // stdout, etc) that may itself contain ``` or other characters that
+    // would otherwise be misparsed as formatting. The leading line-number
+    // gutter Read emits (e.g. "   42\t") is dimmed separately from the
+    // code itself, the way a real code viewer's gutter reads.
+    private val LINE_NUMBER_PREFIX = Regex("""^(\s*\d+)(\t)""")
+
+    private fun renderResultText(text: String): CharSequence {
+        val out = SpannableStringBuilder()
+        val lines = text.split("\n")
+        for ((i, line) in lines.withIndex()) {
+            val m = LINE_NUMBER_PREFIX.find(line)
+            if (m != null) {
+                val start = out.length
+                out.append(m.value)
+                out.setSpan(ForegroundColorSpan(Theme.muted), start, out.length, 0)
+                SyntaxHighlight.append(out, line.substring(m.value.length))
+            } else {
+                SyntaxHighlight.append(out, line)
+            }
+            if (i != lines.lastIndex) out.append("\n")
+        }
+        return out
+    }
+
+    // Image: an actual decoded thumbnail (android.graphics.BitmapFactory,
+    // the platform's own decoder -- not a third-party library, matching
+    // what was asked for explicitly: "use only trusted libraries"). Any
+    // other mime type: a filename/size card, same as an image with no
+    // local copy yet (still uploading, or a fresh install with nothing
+    // cached locally). Either way a Download action saves a real copy via
+    // MediaStore.Downloads (see ChatActivity.downloadAttachment).
+    private fun buildAttachmentView(m: ChatDisplayRow, maxWidth: Int): View {
+        val dp = { v: Int -> Theme.dp(context, v) }
+        val info = m.attachment ?: return LinearLayout(context)
+        val container = LinearLayout(context)
+        container.orientation = LinearLayout.VERTICAL
+
+        val bitmap = if (info.mimeType.startsWith("image/") && info.localPath != null) {
+            decodeSampledBitmap(info.localPath, maxWidth, dp(320))
+        } else null
+
+        if (bitmap != null) {
+            val iv = ImageView(context)
+            iv.setImageBitmap(bitmap)
+            iv.adjustViewBounds = true
+            iv.scaleType = ImageView.ScaleType.FIT_CENTER
+            iv.maxWidth = maxWidth
+            iv.maxHeight = dp(320)
+            container.addView(iv)
+        } else {
+            container.addView(buildAttachmentFileRow(info, dp))
+        }
+
+        if (info.caption.isNotEmpty()) {
+            val cap = plainTextView(info.caption, maxWidth)
+            cap.setPadding(0, dp(4), 0, 0)
+            container.addView(cap)
+        }
+
+        val downloadBtn = TextView(context)
+        downloadBtn.text = "⬇ Download"
+        downloadBtn.textSize = 12f
+        downloadBtn.setTextColor(Theme.primary)
+        downloadBtn.setPadding(0, dp(6), 0, 0)
+        downloadBtn.setOnClickListener {
+            (context as? ChatActivity)?.downloadAttachment(info.localPath, info.attachmentId, info.filename, info.mimeType)
+        }
+        container.addView(downloadBtn)
+        return container
+    }
+
+    private fun buildAttachmentFileRow(info: AttachmentInfo, dp: (Int) -> Int): View {
+        val row = LinearLayout(context)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.gravity = Gravity.CENTER_VERTICAL
+        val icon = TextView(context)
+        icon.text = if (info.mimeType.startsWith("image/")) "🖼" else "📄"
+        icon.textSize = 22f
+        row.addView(icon)
+        val labelCol = LinearLayout(context)
+        labelCol.orientation = LinearLayout.VERTICAL
+        val name = TextView(context)
+        name.text = info.filename
+        name.textSize = 13f
+        name.setTextColor(Theme.onBackground)
+        name.maxLines = 2
+        name.ellipsize = TextUtils.TruncateAt.MIDDLE
+        labelCol.addView(name)
+        val size = TextView(context)
+        size.text = formatBytes(info.size)
+        size.textSize = 11f
+        size.setTextColor(Theme.muted)
+        labelCol.addView(size)
+        val labelParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        labelParams.marginStart = dp(8)
+        row.addView(labelCol, labelParams)
+        return row
+    }
+
+    private fun formatBytes(size: Long): String {
+        if (size < 1024) return "$size B"
+        val kb = size / 1024.0
+        if (kb < 1024) return "%.1f KB".format(kb)
+        return "%.1f MB".format(kb / 1024.0)
+    }
+
+    // Decodes at a size just large enough for this bubble, not the file's
+    // full resolution -- a multi-megapixel photo shouldn't cost tens of MB
+    // of decoded bitmap memory just to show a small thumbnail. Standard
+    // two-pass BitmapFactory pattern: measure bounds only, pick the
+    // smallest power-of-two inSampleSize that still covers the target box,
+    // then decode for real at that scale.
+    private fun decodeSampledBitmap(path: String, maxWidthPx: Int, maxHeightPx: Int): android.graphics.Bitmap? {
+        return try {
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(path, bounds)
+            if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+            var sample = 1
+            while (bounds.outWidth / (sample * 2) >= maxWidthPx && bounds.outHeight / (sample * 2) >= maxHeightPx) {
+                sample *= 2
+            }
+            val opts = BitmapFactory.Options().apply { inSampleSize = sample }
+            BitmapFactory.decodeFile(path, opts)
+        } catch (e: Exception) {
+            null
+        }
     }
 
     private fun plainTextView(content: CharSequence, maxWidth: Int): TextView {
@@ -133,7 +493,7 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
             val row = TableRow(context)
             for (c in cells) {
                 val cell = TextView(context)
-                cell.text = if (isHeader) c else Markdown.renderInline(c, Theme.bg)
+                cell.text = if (isHeader) c else Markdown.renderInline(c)
                 cell.textSize = 12f
                 cell.setTextColor(Theme.onBackground)
                 cell.setTypeface(Typeface.MONOSPACE, if (isHeader) Typeface.BOLD else Typeface.NORMAL)

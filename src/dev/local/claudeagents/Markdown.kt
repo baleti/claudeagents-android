@@ -2,7 +2,6 @@ package dev.local.claudeagents
 
 import android.graphics.Typeface
 import android.text.SpannableStringBuilder
-import android.text.style.BackgroundColorSpan
 import android.text.style.ForegroundColorSpan
 import android.text.style.RelativeSizeSpan
 import android.text.style.StyleSpan
@@ -38,13 +37,13 @@ object Markdown {
     // still gets processed instead of showing the raw markdown characters
     // (confirmed live 2026-09-05: cells rendered literal asterisks/backticks
     // before this).
-    fun renderInline(text: String, codeBg: Int): SpannableStringBuilder {
+    fun renderInline(text: String): SpannableStringBuilder {
         val out = SpannableStringBuilder()
-        appendInline(out, text, codeBg)
+        appendInline(out, text)
         return out
     }
 
-    fun renderSegments(text: String, codeBg: Int, dimColor: Int): List<MdSegment> {
+    fun renderSegments(text: String, dimColor: Int): List<MdSegment> {
         val segments = mutableListOf<MdSegment>()
         val lines = text.split("\n")
         var textBuf = SpannableStringBuilder()
@@ -75,16 +74,16 @@ object Markdown {
             if (line.trim().startsWith("```")) {
                 inFence = !inFence
             } else if (inFence) {
-                appendCodeLine(textBuf, line, codeBg)
+                appendCodeLine(textBuf, line)
             } else when {
                 line.startsWith("→ ") -> appendDim(textBuf, line, dimColor)
                 line.trimStart().startsWith("# ") -> appendHeader(textBuf, line.trimStart().removePrefix("# "))
                 line.trimStart().startsWith("- ") || line.trimStart().startsWith("* ") -> {
                     val indent = line.takeWhile { it == ' ' }
                     textBuf.append(indent).append("• ")
-                    appendInline(textBuf, line.trimStart().removePrefix("- ").removePrefix("* "), codeBg)
+                    appendInline(textBuf, line.trimStart().removePrefix("- ").removePrefix("* "))
                 }
-                else -> appendInline(textBuf, line, codeBg)
+                else -> appendInline(textBuf, line)
             }
             if (i != lines.lastIndex) textBuf.append("\n")
             i++
@@ -120,17 +119,20 @@ object Markdown {
         out.setSpan(StyleSpan(Typeface.ITALIC), start, out.length, 0)
     }
 
-    private fun appendCodeLine(out: SpannableStringBuilder, text: String, codeBg: Int) {
+    private fun appendCodeLine(out: SpannableStringBuilder, text: String) {
         val start = out.length
         SyntaxHighlight.append(out, text)
         out.setSpan(TypefaceSpan("monospace"), start, out.length, 0)
-        out.setSpan(BackgroundColorSpan(codeBg), start, out.length, 0)
     }
 
     // Inline **bold** and `code` spans within one line. Simple left-to-right
     // scan, not a real tokenizer -- an odd number of ** or ` on a line just
     // renders the trailing marker literally rather than guessing intent.
-    private fun appendInline(out: SpannableStringBuilder, text: String, codeBg: Int) {
+    // No background span on code -- monospace + SyntaxHighlight's per-token
+    // foreground colors are the only visual difference from prose (asked
+    // for explicitly: "don't change color of code in messages, just apply
+    // syntax coloring" -- a tinted box read as an unwanted color change).
+    private fun appendInline(out: SpannableStringBuilder, text: String) {
         var i = 0
         while (i < text.length) {
             if (text.startsWith("**", i)) {
@@ -148,7 +150,6 @@ object Markdown {
                     val start = out.length
                     SyntaxHighlight.append(out, text.substring(i + 1, end))
                     out.setSpan(TypefaceSpan("monospace"), start, out.length, 0)
-                    out.setSpan(BackgroundColorSpan(codeBg), start, out.length, 0)
                     i = end + 1
                     continue
                 }

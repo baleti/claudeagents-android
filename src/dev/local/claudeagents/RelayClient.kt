@@ -89,10 +89,58 @@ class RelayClient(context: Context) {
     fun getQueue(sessionId: String): JSONObject =
         request("GET", "/api/v1/conversations/$sessionId/queue", null)
 
-    fun send(sessionId: String, text: String): JSONObject {
+    // Starts a brand-new tmux+claude session on host3 under the given
+    // account's CLAUDE_CONFIG_DIR (the daemon's own spawn_session -- same
+    // `tmux new-session ... claude --dangerously-skip-permissions
+    // --session-id <uuid>` primitive host3's other per-account launch
+    // points already use) and primes it with `text`. Response carries the
+    // new session_id once the transcript file exists (daemon-side wait, up
+    // to ~15s) -- readTimeoutMs generous to match.
+    fun spawn(account: String, text: String): JSONObject {
+        val body = JSONObject()
+        body.put("account", account)
+        body.put("text", text)
+        return request("POST", "/api/v1/spawn", body, readTimeoutMs = 25000)
+    }
+
+    // `id` is the outbox row's stable client_msg_id, resent unchanged on
+    // every retry -- lets the daemon recognize a retry of an already-
+    // handled send (its 200 response lost after delivery, e.g. the tunnel
+    // dropped right after) and replay that result instead of typing the
+    // same text into the live session or queuing it a second time.
+    fun send(sessionId: String, text: String, id: String): JSONObject {
         val body = JSONObject()
         body.put("text", text)
+        body.put("id", id)
         return request("POST", "/api/v1/conversations/$sessionId/send", body)
+    }
+
+    // Same base64-in-JSON shape the daemon expects (see claude-agents-daemon.py --
+    // deliberately not multipart, a hand-rolled multipart parser is itself a
+    // common source of bugs; base64 via android.util.Base64 (platform, not a
+    // third-party library) keeps the whole API uniformly JSON). `id` is the
+    // same idempotent client_msg_id convention `send` uses. Generous timeout:
+    // a 25MB file base64-inflates to ~33MB, real upload time on a slow link.
+    fun uploadAttachment(sessionId: String, filename: String, mimeType: String, data: ByteArray, caption: String, id: String): JSONObject {
+        val body = JSONObject()
+        body.put("filename", filename)
+        body.put("mime_type", mimeType)
+        body.put("data_base64", android.util.Base64.encodeToString(data, android.util.Base64.NO_WRAP))
+        body.put("caption", caption)
+        body.put("id", id)
+        return request("POST", "/api/v1/conversations/$sessionId/attachments", body, readTimeoutMs = 90000)
+    }
+
+    class DownloadedAttachment(val filename: String, val mimeType: String, val data: ByteArray)
+
+    fun downloadAttachment(attachmentId: String): DownloadedAttachment {
+        val resp = request("GET", "/api/v1/attachments/$attachmentId", null, readTimeoutMs = 90000)
+        val data = android.util.Base64.decode(resp.getString("data_base64"), android.util.Base64.DEFAULT)
+        return DownloadedAttachment(
+            filename = resp.optString("filename", "file"),
+            mimeType = resp.optString("mime_type", "application/octet-stream"),
+            data = data
+        )
     }
 
     companion object {
@@ -106,7 +154,8 @@ class RelayClient(context: Context) {
                         line = m.getInt("line"),
                         role = m.getString("role"),
                         text = m.optString("text", ""),
-                        ts = if (m.isNull("ts")) null else m.optString("ts")
+                        ts = if (m.isNull("ts")) null else m.optString("ts"),
+                        errorType = if (m.isNull("error_type")) null else m.optString("error_type")
                     )
                 )
             }
@@ -126,6 +175,7 @@ class RelayClient(context: Context) {
                         title = c.optString("title", "(untitled)"),
                         mtime = c.optDouble("mtime", 0.0),
                         lineCount = c.optInt("line_count", 0),
+                        tokens = if (c.isNull("tokens")) null else c.optInt("tokens"),
                         livePane = live?.optString("pane")
                     )
                 )

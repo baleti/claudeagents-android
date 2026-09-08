@@ -11,16 +11,22 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.text.Editable
 import android.text.InputType
+import android.text.TextUtils
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewGroup
 import android.widget.AdapterView
+import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ListView
+import android.widget.PopupWindow
 import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
@@ -30,14 +36,64 @@ class MainActivity : Activity() {
     private lateinit var root: LinearLayout
     private var adapter: ConversationAdapter? = null
     private var offlineBanner: TextView? = null
+    private var searchPopup: PopupWindow? = null
 
     private var pullIndicator: ProgressBar? = null
 
+    // Full unfiltered list from the local cache, re-fetched on every
+    // refreshList(); the adapter only ever sees applyFilter()'s output so a
+    // sync/pull-to-refresh mid-search doesn't clear what's typed. Only
+    // conversations with a claude agent actually running on host3 right now
+    // -- "have it show only currently active conversations, don't show
+    // archived ones" (asked for explicitly 2026-09-07) -- so an idle,
+    // finished conversation from last week doesn't clutter a list meant for
+    // "what can I message right now".
+    private var allConversations: List<ConversationRow> = emptyList()
+    private var searchQuery: String = ""
+    private var syncSpinner: View? = null
+    private var syncLabel: TextView? = null
+    // Whether a round is actively running right now -- kept separate from
+    // the "Synced N ago" text so the two compose instead of one replacing
+    // the other: while syncing, the label still shows how stale the data
+    // was *before* this round started (asked for explicitly: "still show
+    // 'synced N ago' as well next to when 'Syncing...' happens"), and it
+    // keeps ticking forward via the same 30s tick either way.
+    private var syncingNow = false
+
+    // A background sync is otherwise completely silent -- the whole point
+    // of shortening the periodic interval (see SyncJobService) is that a
+    // catch-up round can now happen while you're not even looking, so
+    // there needs to be *some* visible sign it's happening rather than the
+    // list just quietly updating underneath you (asked for explicitly: "if
+    // we are not [in sync] we should know about it and sync in the
+    // background, showing some visual cue" -- and, once that existed,
+    // "could [it] also tell when the last syncing completed"). The row
+    // itself is always visible (unlike most of this app's chrome) since
+    // it's exactly the piece of information that answers "can I trust
+    // what I'm looking at right now".
     private val syncReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == SyncLogic.ACTION_SYNC_STARTED) {
+                syncingNow = true
+                syncSpinner?.visibility = View.VISIBLE
+                updateSyncStatusLabel()
+                return
+            }
+            syncingNow = false
+            syncSpinner?.visibility = View.GONE
+            updateSyncStatusLabel()
             refreshList()
             hidePullIndicator()
         }
+    }
+
+    private fun updateSyncStatusLabel() {
+        val prefix = if (syncingNow) "Syncing… " else ""
+        val at = SyncLogic.lastSyncAt(this) ?: run {
+            syncLabel?.text = prefix + "not synced yet"
+            return
+        }
+        syncLabel?.text = "$prefix" + "synced ${Fmt.ago(at / 1000.0)} ago"
     }
 
     // The AGE column reads "now - mtime" at bind time, but a ListView only
@@ -46,17 +102,20 @@ class MainActivity : Activity() {
     // stale instead of ticking forward. Re-rendered periodically here
     // purely for that reason: no network call, no DB query, just recompute
     // Fmt.ago() against the current clock for whatever's already loaded.
+    // The sync-status label is the same kind of "age" text, so it rides
+    // the same tick.
     private val ageTickHandler = Handler(Looper.getMainLooper())
     private val ageTick = object : Runnable {
         override fun run() {
             adapter?.notifyDataSetChanged()
+            updateSyncStatusLabel()
             ageTickHandler.postDelayed(this, 30_000)
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        db = Db(this)
+        db = Db.getInstance(this)
         root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
         root.setBackgroundColor(Theme.bg)
@@ -70,20 +129,53 @@ class MainActivity : Activity() {
         } else {
             showPairingView()
         }
+
+        // Read-aloud's playback foreground service posts a persistent
+        // media-style notification (play/pause/stop) the same way any
+        // other media app does -- on API 33+ that needs this runtime grant
+        // or the notification (and its transport controls) just silently
+        // never appears, even though audio still plays. Asked up front
+        // here rather than the first time read-aloud is actually used, so
+        // there's no surprise permission prompt interrupting that flow.
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) {
+            requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 1)
+        }
     }
 
     override fun onResume() {
         super.onResume()
+        val syncFilter = IntentFilter().apply {
+            addAction(SyncLogic.ACTION_SYNC_COMPLETE)
+            addAction(SyncLogic.ACTION_SYNC_STARTED)
+        }
         if (Build.VERSION.SDK_INT >= 33) {
-            registerReceiver(syncReceiver, IntentFilter(SyncLogic.ACTION_SYNC_COMPLETE), Context.RECEIVER_NOT_EXPORTED)
+            registerReceiver(syncReceiver, syncFilter, Context.RECEIVER_NOT_EXPORTED)
         } else {
             @Suppress("UnspecifiedRegisterReceiverFlag")
-            registerReceiver(syncReceiver, IntentFilter(SyncLogic.ACTION_SYNC_COMPLETE))
+            registerReceiver(syncReceiver, syncFilter)
         }
         if (TokenStore.isPaired(this)) {
             refreshList()
+            // Re-asserted every resume (not just at pairing time) so an
+            // already-paired install picks up a lowered interval the next
+            // time this build runs, without needing to re-pair.
+            SyncJobService.schedulePeriodic(this)
             SyncJobService.scheduleImmediate(this)
         }
+        // Refreshed synchronously here, not just left to the recurring
+        // tick below -- reported stuck at a stale "synced Ns ago" that
+        // never advanced: onResume previously only *scheduled* the first
+        // tick 30s out, so a background stretch long enough for Android to
+        // freeze the process (common once it's no longer the foreground
+        // app) left the label showing whatever it said at the moment it
+        // froze until that delayed tick finally got to run. Updating
+        // immediately here means the instant this screen is actually
+        // looked at, the label is correct regardless of how long the tick
+        // loop was suspended.
+        updateSyncStatusLabel()
+        ageTickHandler.removeCallbacks(ageTick)
         ageTickHandler.postDelayed(ageTick, 30_000)
     }
 
@@ -94,6 +186,17 @@ class MainActivity : Activity() {
         } catch (e: IllegalArgumentException) {
         }
         ageTickHandler.removeCallbacks(ageTick)
+        searchPopup?.dismiss()
+    }
+
+    private fun showOverflowMenu(anchor: View) {
+        val popup = android.widget.PopupMenu(this, anchor)
+        popup.menu.add("Read aloud settings")
+        popup.setOnMenuItemClickListener {
+            startActivity(Intent(this, TtsSettingsActivity::class.java))
+            true
+        }
+        popup.show()
     }
 
     private fun dp(v: Int): Int = Theme.dp(this, v)
@@ -183,6 +286,106 @@ class MainActivity : Activity() {
             .show()
     }
 
+    private fun showNewSessionDialog() {
+        val dp = { v: Int -> Theme.dp(this, v) }
+        val container = LinearLayout(this)
+        container.orientation = LinearLayout.VERTICAL
+        val pad = dp(20)
+        container.setPadding(pad, pad, pad, pad)
+
+        val acctLabel = label("Account", 12f, Theme.muted)
+        container.addView(acctLabel)
+
+        val acctRow = LinearLayout(this)
+        acctRow.orientation = LinearLayout.HORIZONTAL
+        val acctRowParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        acctRowParams.topMargin = dp(6)
+        acctRowParams.bottomMargin = dp(16)
+        container.addView(acctRow, acctRowParams)
+
+        // Same dir_key spelling as everywhere else in this app (see
+        // ConversationColumns.accountNumber) -- the daemon's ACCOUNT_DIRS.
+        val accountKeys = listOf("claude", "claude2", "claude3")
+        var selected = 0
+        val acctButtons = mutableListOf<Button>()
+        fun restyle() {
+            acctButtons.forEachIndexed { i, b ->
+                if (i == selected) Theme.stylePrimaryButton(b, this) else Theme.styleGhostButton(b, this)
+            }
+        }
+        accountKeys.forEachIndexed { i, _ ->
+            val b = Button(this)
+            b.text = (i + 1).toString()
+            b.isAllCaps = false
+            b.setTypeface(null, Typeface.BOLD)
+            b.setTextColor(Theme.onPrimary)
+            val bp = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            if (i > 0) bp.marginStart = dp(8)
+            b.setOnClickListener { selected = i; restyle() }
+            acctButtons.add(b)
+            acctRow.addView(b, bp)
+        }
+        restyle()
+
+        val input = EditText(this)
+        input.hint = "First message…"
+        input.minLines = 2
+        input.maxLines = 5
+        Theme.styleEditText(input, this)
+        container.addView(input, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("New conversation")
+            .setView(container)
+            .setPositiveButton("Start", null)
+            .setNegativeButton("Cancel", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val text = input.text.toString().trim()
+                if (text.isEmpty()) {
+                    Toast.makeText(this, "Type a first message", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                dialog.dismiss()
+                spawnSession(accountKeys[selected], text)
+            }
+        }
+        dialog.show()
+    }
+
+    // Same primitive as the daemon's other launch points: tmux new-session
+    // + claude --session-id under the chosen account's CLAUDE_CONFIG_DIR
+    // (claude-agents-daemon.py's spawn_session / POST /api/v1/spawn).
+    // Network call, so off the main thread; navigates straight into the
+    // new conversation on success the same way tapping an existing row
+    // does.
+    private fun spawnSession(account: String, text: String) {
+        Toast.makeText(this, "Starting session…", Toast.LENGTH_SHORT).show()
+        Thread {
+            try {
+                val client = RelayClient(this)
+                val resp = client.spawn(account, text)
+                val sessionId = resp.optString("session_id", "")
+                runOnUiThread {
+                    if (sessionId.isEmpty()) {
+                        Toast.makeText(this, "Spawn failed: no session id returned", Toast.LENGTH_LONG).show()
+                        return@runOnUiThread
+                    }
+                    SyncJobService.scheduleImmediate(this)
+                    val intent = Intent(this, ChatActivity::class.java)
+                    intent.putExtra("session_id", sessionId)
+                    intent.putExtra("title", text.take(60))
+                    startActivity(intent)
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    Toast.makeText(this, "Spawn failed: ${e.message}", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
+    }
+
     // No refresh/re-pair buttons -- a persistent header row for two rarely-
     // used actions wasted space on every single screen view (asked for
     // explicitly: "let's just have one view of the table"). Refresh is a
@@ -206,6 +409,100 @@ class MainActivity : Activity() {
         bannerParams.topMargin = dp(10)
         bannerParams.bottomMargin = dp(4)
         root.addView(banner, bannerParams)
+
+        val searchRow = LinearLayout(this)
+        searchRow.orientation = LinearLayout.HORIZONTAL
+        val searchRowParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        searchRowParams.leftMargin = dp(12)
+        searchRowParams.rightMargin = dp(12)
+        searchRowParams.topMargin = dp(8)
+        searchRowParams.bottomMargin = dp(4)
+        root.addView(searchRow, searchRowParams)
+
+        val searchInput = EditText(this)
+        searchInput.hint = "Search… (/fv /s /rv, see query-dsl.md)"
+        searchInput.setSingleLine(true)
+        searchInput.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
+        Theme.styleEditText(searchInput, this)
+        val searchParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        searchRow.addView(searchInput, searchParams)
+        searchInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                searchQuery = s?.toString() ?: ""
+                applyFilter()
+                updateSearchPopup(searchInput)
+            }
+        })
+
+        // New-session entry point -- same primitive host3's other per-
+        // account launch points use (tmux new-session + claude under that
+        // account's CLAUDE_CONFIG_DIR), via the daemon's existing
+        // spawn_session()/POST /api/v1/spawn (asked for explicitly: "add
+        // options to spawn new claude1/claude2/claude3 sessions via the
+        // same mechanism as in .shortcuts scripts" -- couldn't read those
+        // scripts directly, phone unreachable this session, so this reuses
+        // the daemon's own equivalent already-built primitive instead).
+        val newButton = Button(this)
+        newButton.text = "+"
+        newButton.isAllCaps = false
+        newButton.textSize = 16f
+        newButton.setTextColor(Theme.onPrimary)
+        newButton.setTypeface(null, Typeface.BOLD)
+        Theme.stylePrimaryButton(newButton, this)
+        // stylePrimaryButton's padding is sized for a normal-width text
+        // button ("Send" etc) -- a bare "+" icon-only button reads too big
+        // next to the search field at that size. Buttons also carry a
+        // platform-default minWidth/minHeight (~48dp) that padding alone
+        // can't shrink below, so both are zeroed here.
+        newButton.minWidth = 0
+        newButton.minimumWidth = 0
+        newButton.minHeight = 0
+        newButton.minimumHeight = 0
+        newButton.setPadding(dp(14), dp(6), dp(14), dp(6))
+        val newButtonParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        newButtonParams.marginStart = dp(8)
+        newButtonParams.gravity = Gravity.CENTER_VERTICAL
+        newButton.setOnClickListener { showNewSessionDialog() }
+        searchRow.addView(newButton, newButtonParams)
+
+        // No visible ActionBar anywhere in this app (every screen hides it
+        // and builds its own chrome by hand), so "three dots menu" is a
+        // plain PopupMenu anchored to a hand-built button rather than a
+        // real options-menu overflow -- same idiom this app already uses
+        // for other popups (commandPopup, searchPopup).
+        val overflowButton = TextView(this)
+        overflowButton.text = "⋮"
+        overflowButton.textSize = 20f
+        overflowButton.setTextColor(Theme.onBackground)
+        overflowButton.setPadding(dp(10), dp(4), dp(4), dp(4))
+        overflowButton.setOnClickListener { showOverflowMenu(overflowButton) }
+        val overflowParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        overflowParams.gravity = Gravity.CENTER_VERTICAL
+        searchRow.addView(overflowButton, overflowParams)
+
+        val syncRow = LinearLayout(this)
+        syncRow.orientation = LinearLayout.HORIZONTAL
+        syncRow.gravity = Gravity.CENTER_VERTICAL
+        val spinner = ProgressBar(this)
+        spinner.isIndeterminate = true
+        spinner.visibility = View.GONE
+        syncRow.addView(spinner, LinearLayout.LayoutParams(dp(14), dp(14)))
+        syncSpinner = spinner
+        val label = TextView(this)
+        label.textSize = 11f
+        label.setTextColor(Theme.muted)
+        val syncLabelParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        syncLabelParams.marginStart = dp(6)
+        syncRow.addView(label, syncLabelParams)
+        syncLabel = label
+        updateSyncStatusLabel()
+        val syncRowParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        syncRowParams.leftMargin = dp(12)
+        syncRowParams.topMargin = dp(2)
+        syncRowParams.bottomMargin = dp(2)
+        root.addView(syncRow, syncRowParams)
 
         val header = tableHeaderRow()
         header.setOnLongClickListener { confirmRepair(); true }
@@ -337,7 +634,7 @@ class MainActivity : Activity() {
         titleParams.marginEnd = dp(8)
         title.layoutParams = titleParams
         row.addView(title)
-        row.addView(headerLabel("LN", ConversationColumns.lines, alignEnd = true))
+        row.addView(headerLabel("TKNS", ConversationColumns.tokens, alignEnd = true))
         val ago = headerLabel("AGE", ConversationColumns.ago, alignEnd = true)
         (ago.layoutParams as LinearLayout.LayoutParams).marginStart = dp(6)
         row.addView(ago)
@@ -351,8 +648,9 @@ class MainActivity : Activity() {
     }
 
     private fun refreshList() {
-        val a = adapter ?: return
-        a.items = db.listConversations()
+        adapter ?: return
+        allConversations = db.listConversations().filter { it.isLive }
+        applyFilter()
         val ok = getSharedPreferences("claudeagents_prefs", Context.MODE_PRIVATE)
             .getBoolean("last_sync_ok", true)
         offlineBanner?.let {
@@ -369,6 +667,95 @@ class MainActivity : Activity() {
                 it.text = "Offline / server unreachable — showing cached conversations"
                 it.visibility = View.VISIBLE
             }
+        }
+    }
+
+    private fun applyFilter() {
+        adapter?.items = QueryDsl.apply(allConversations, searchQuery)
+    }
+
+    // Three-column suggestion row (label / greyed alias / greyed
+    // description), the "Suggestion row anatomy" from query-dsl.md.
+    private class SuggestionRowAdapter(private val context: Context, private val data: List<QueryDsl.Suggestion>) : BaseAdapter() {
+        override fun getCount() = data.size
+        override fun getItem(position: Int) = data[position]
+        override fun getItemId(position: Int) = position.toLong()
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+            val dp = { v: Int -> Theme.dp(context, v) }
+            val row: LinearLayout
+            val label: TextView
+            val meta: TextView
+            if (convertView == null) {
+                row = LinearLayout(context)
+                row.orientation = LinearLayout.HORIZONTAL
+                row.setBackgroundColor(Theme.surface)
+                val padH = dp(14)
+                val padV = dp(10)
+                row.setPadding(padH, padV, padH, padV)
+                label = TextView(context)
+                label.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL)
+                label.textSize = 14f
+                label.setTextColor(Theme.onBackground)
+                row.addView(label, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+                meta = TextView(context)
+                meta.textSize = 12f
+                meta.setTextColor(Theme.muted)
+                meta.maxLines = 1
+                meta.ellipsize = TextUtils.TruncateAt.END
+                val metaParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+                metaParams.marginStart = dp(10)
+                row.addView(meta, metaParams)
+                row.tag = arrayOf(label, meta)
+            } else {
+                row = convertView as LinearLayout
+                @Suppress("UNCHECKED_CAST")
+                val tag = row.tag as Array<TextView>
+                label = tag[0]
+                meta = tag[1]
+            }
+            val s = data[position]
+            label.text = s.label
+            meta.text = listOfNotNull(s.alias, s.description.ifEmpty { null }).joinToString("  ")
+            return row
+        }
+    }
+
+    private fun updateSearchPopup(anchor: EditText) {
+        val suggestions = if (searchQuery.isEmpty()) emptyList() else QueryDsl.suggestions(allConversations, searchQuery)
+        if (suggestions.isEmpty()) {
+            searchPopup?.dismiss()
+            return
+        }
+        val listView = ListView(this)
+        listView.divider = null
+        listView.dividerHeight = 0
+        listView.setBackgroundColor(Theme.surface)
+        listView.adapter = SuggestionRowAdapter(this, suggestions)
+        listView.setOnItemClickListener { _, _, position, _ ->
+            val s = suggestions[position]
+            val from = QueryDsl.replaceFrom(searchQuery)
+            val newText = searchQuery.substring(0, from) + s.insertText
+            anchor.setText(newText)
+            anchor.setSelection(newText.length)
+            // afterTextChanged() (triggered by setText above) re-derives
+            // searchQuery/applyFilter/updateSearchPopup from the new text.
+        }
+
+        val popup = searchPopup ?: PopupWindow(this).also {
+            it.isOutsideTouchable = true
+            it.isFocusable = false
+            it.setBackgroundDrawable(Theme.roundedDrawable(Theme.surface, this, strokeColor = Theme.outlineVariant))
+            searchPopup = it
+        }
+        popup.contentView = listView
+        val rowHeightPx = dp(40)
+        val popupHeight = rowHeightPx * suggestions.size.coerceAtMost(6)
+        if (popup.isShowing) {
+            popup.update(anchor.width, popupHeight)
+        } else {
+            popup.width = anchor.width
+            popup.height = popupHeight
+            popup.showAsDropDown(anchor, 0, 0)
         }
     }
 }
