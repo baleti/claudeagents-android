@@ -363,6 +363,15 @@ class TtsPlaybackService : Service() {
      * build relative seek ("skip back/forward 15s") on top of seekTo(). */
     fun getPositionMs(): Long = estimatedPositionMs()
 
+    // Same "whichever is bigger" duration the media session's own metadata
+    // already shows (see enqueueSentence/setEstimatedDuration) - exposed
+    // here too so an in-app scrubber can show the identical number rather
+    // than recomputing its own, separately-drifting guess.
+    fun getDisplayDurationMs(): Long {
+        val real = synchronized(lock) { allSentences.sumOf { it.durationMs } }
+        return maxOf(estimatedTotalMs, real)
+    }
+
     /** True from startSession() until the session genuinely ends (queue
      * drains with nothing more coming, or stopAll()) -- stays true across
      * a pause, unlike isPlaying(). A controller that just (re)bound uses

@@ -72,12 +72,16 @@ class PlayerControlBar(
             setOnClickListener { onClick() }
         }
 
-        val prevSectionButton = iconImageView(context, "ic_prev_section", 18) { onPreviousSection() }
-        val rewindButton = iconImageView(context, "ic_rewind", 22) { onRewind() }
+        // Sizes bumped up a second time -- reported live 2026-09-10, after
+        // the codex-icon swap-in, still "too small" at the original
+        // 14-22dp range this row used with the earlier hand-drawn icons.
+        // Kept in sync with newsdigest-android's copy of this file.
+        val prevSectionButton = iconImageView(context, "ic_prev_section", 26) { onPreviousSection() }
+        val rewindButton = iconImageView(context, "ic_rewind", 32) { onRewind() }
         playPauseButton = PlayPauseImageView(context) { onPlayPause() }
-        val forwardButton = iconImageView(context, "ic_forward", 22) { onForward() }
-        val nextSectionButton = iconImageView(context, "ic_next_section", 18) { onNextSection() }
-        val locateButton = iconImageView(context, "ic_locate", 20) { onLocate() }
+        val forwardButton = iconImageView(context, "ic_forward", 32) { onForward() }
+        val nextSectionButton = iconImageView(context, "ic_next_section", 26) { onNextSection() }
+        val locateButton = iconImageView(context, "ic_locate", 28) { onLocate() }
         speedButton = iconButton("1x") { onSpeedClick(speedButton) }
 
         view = LinearLayout(context).apply {
@@ -146,7 +150,7 @@ private class PlayPauseImageView(context: Context, onClick: () -> Unit) : ImageV
     init {
         scaleType = ScaleType.FIT_CENTER
         adjustViewBounds = true
-        val sizePx = Theme.dp(context, 22)
+        val sizePx = Theme.dp(context, 34)
         maxWidth = sizePx
         maxHeight = sizePx
         minimumHeight = Theme.dp(context, 44)
