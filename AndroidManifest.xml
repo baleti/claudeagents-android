@@ -28,6 +28,11 @@
             android:windowSoftInputMode="adjustResize"
             android:label="Claude Agents" />
 
+        <activity
+            android:name=".ArchiveActivity"
+            android:exported="false"
+            android:label="Archive" />
+
         <service
             android:name=".SyncJobService"
             android:permission="android.permission.BIND_JOB_SERVICE"

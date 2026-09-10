@@ -88,7 +88,15 @@ data class OutboxRow(
     // lets the daemon recognize a retried POST (response lost after it was
     // already delivered/queued) as the same send instead of acting on it
     // twice (see claude-agents-daemon.py's record_send_result/lookup_send_result).
-    val clientMsgId: String
+    val clientMsgId: String,
+    // True for a message typed into a conversation opened from the Archive
+    // view (no live tmux pane at open time) -- OutboxLogic posts these to
+    // POST .../resume instead of .../send, which relaunches the session via
+    // `claude --resume` if it's still not live. Stays true for the rest of
+    // that ChatActivity's outbox rows even if the conversation goes live in
+    // the meantime; the daemon's /resume handles that case by delivering
+    // straight into the now-live pane instead of resuming a second time.
+    val viaResume: Boolean = false
 )
 
 data class AttachmentOutboxRow(

@@ -50,7 +50,40 @@ object Markdown {
         var inFence = false
         var i = 0
 
+        // Consecutive plain-prose lines (the `else` branch below) are
+        // joined back together with their original "\n"s and run through
+        // appendInline as ONE string, not one call per line -- **bold**
+        // (or `code`) spanning a line break was never found and rendered
+        // literally otherwise, since each line was scanned for a matching
+        // closing marker independently, with no visibility into the next
+        // line at all (reported live 2026-09-09: "bold markdown
+        // formatting... isn't being rendered" -- rare in practice since
+        // most bold runs stay on one line, but real whenever a reply's
+        // own markdown source happens to wrap one across a "\n").
+        // Headers/bullets/tool-call lines/fences are still handled per
+        // line exactly as before -- only contiguous prose runs are grouped.
+        val proseBuf = StringBuilder()
+
+        // A prose run's own lines were already joined with "\n" inside
+        // proseBuf, matching what per-line appends used to produce -- but
+        // the ORIGINAL per-line loop also appended a "\n" after the run's
+        // very last line (since that line's own `i != lines.lastIndex`
+        // check fired too, right before whatever non-prose content came
+        // next). Flushing the joined buffer via one appendInline() call
+        // loses that final separator, so flushProse() re-adds it itself --
+        // except at the true end of the whole text (flushText()'s own
+        // call), where the original loop's "never a trailing newline on
+        // the very last line" rule still applies.
+        fun flushProse(trailingNewline: Boolean = true) {
+            if (proseBuf.isNotEmpty()) {
+                appendInline(textBuf, proseBuf.toString())
+                if (trailingNewline) textBuf.append("\n")
+                proseBuf.clear()
+            }
+        }
+
         fun flushText() {
+            flushProse(trailingNewline = false)
             if (textBuf.isNotEmpty()) {
                 segments.add(MdSegment.Text(textBuf))
                 textBuf = SpannableStringBuilder()
@@ -71,21 +104,40 @@ object Markdown {
                 segments.add(MdSegment.Table(header, rows))
                 continue
             }
+            val isProseLine: Boolean
             if (line.trim().startsWith("```")) {
+                flushProse()
                 inFence = !inFence
+                isProseLine = false
             } else if (inFence) {
+                flushProse()
                 appendCodeLine(textBuf, line)
+                isProseLine = false
             } else when {
-                line.startsWith("→ ") -> appendDim(textBuf, line, dimColor)
-                line.trimStart().startsWith("# ") -> appendHeader(textBuf, line.trimStart().removePrefix("# "))
+                line.startsWith("→ ") -> {
+                    flushProse()
+                    appendDim(textBuf, line, dimColor)
+                    isProseLine = false
+                }
+                line.trimStart().startsWith("# ") -> {
+                    flushProse()
+                    appendHeader(textBuf, line.trimStart().removePrefix("# "))
+                    isProseLine = false
+                }
                 line.trimStart().startsWith("- ") || line.trimStart().startsWith("* ") -> {
+                    flushProse()
                     val indent = line.takeWhile { it == ' ' }
                     textBuf.append(indent).append("• ")
                     appendInline(textBuf, line.trimStart().removePrefix("- ").removePrefix("* "))
+                    isProseLine = false
                 }
-                else -> appendInline(textBuf, line)
+                else -> {
+                    if (proseBuf.isNotEmpty()) proseBuf.append("\n")
+                    proseBuf.append(line)
+                    isProseLine = true
+                }
             }
-            if (i != lines.lastIndex) textBuf.append("\n")
+            if (i != lines.lastIndex && !isProseLine) textBuf.append("\n")
             i++
         }
         flushText()
@@ -125,13 +177,14 @@ object Markdown {
         out.setSpan(TypefaceSpan("monospace"), start, out.length, 0)
     }
 
-    // Inline **bold** and `code` spans within one line. Simple left-to-right
-    // scan, not a real tokenizer -- an odd number of ** or ` on a line just
-    // renders the trailing marker literally rather than guessing intent.
-    // No background span on code -- monospace + SyntaxHighlight's per-token
-    // foreground colors are the only visual difference from prose (asked
-    // for explicitly: "don't change color of code in messages, just apply
-    // syntax coloring" -- a tinted box read as an unwanted color change).
+    // Inline **bold**, *italic*, and `code` spans within one line. Simple
+    // left-to-right scan, not a real tokenizer -- an odd number of
+    // **/*/` on a line just renders the trailing marker literally rather
+    // than guessing intent. No background span on code -- monospace +
+    // SyntaxHighlight's per-token foreground colors are the only visual
+    // difference from prose (asked for explicitly: "don't change color of
+    // code in messages, just apply syntax coloring" -- a tinted box read
+    // as an unwanted color change).
     private fun appendInline(out: SpannableStringBuilder, text: String) {
         var i = 0
         while (i < text.length) {
@@ -142,6 +195,24 @@ object Markdown {
                     out.append(text.substring(i + 2, end))
                     out.setSpan(StyleSpan(Typeface.BOLD), start, out.length, 0)
                     i = end + 2
+                    continue
+                }
+            } else if (text[i] == '*' && i + 1 < text.length && text[i + 1] != ' ') {
+                // Single asterisk (reported live 2026-09-09 -- "single
+                // asterisks rather than double surrounding words" was
+                // never handled at all, only **bold**/`code`; *word*
+                // rendered as literal asterisks). Guarded against a space
+                // right after the opening marker or right before the
+                // closing one -- CommonMark itself requires no interior
+                // whitespace there, and without the guard a bare "*" used
+                // mid-sentence (a glob, a multiplication) would get
+                // mistaken for an opening marker.
+                val end = text.indexOf('*', i + 1)
+                if (end > i + 1 && text[end - 1] != ' ') {
+                    val start = out.length
+                    out.append(text.substring(i + 1, end))
+                    out.setSpan(StyleSpan(Typeface.ITALIC), start, out.length, 0)
+                    i = end + 1
                     continue
                 }
             } else if (text[i] == '`') {

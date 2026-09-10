@@ -4,15 +4,20 @@ import android.content.Context
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.Typeface
+import android.text.Spanned
 import android.text.SpannableStringBuilder
 import android.text.TextUtils
+import android.text.style.BackgroundColorSpan
 import android.text.style.ForegroundColorSpan
+import android.view.GestureDetector
 import android.view.Gravity
+import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.BaseAdapter
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.ListView
 import android.widget.TableLayout
 import android.widget.TableRow
 import android.widget.TextView
@@ -23,6 +28,91 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
             field = value
             notifyDataSetChanged()
         }
+
+    // Set once by ChatActivity right after `listView.adapter = this` --
+    // needed so setHighlight() below can find the currently-bound View for
+    // a given row (if it's on screen right now) without a full
+    // notifyDataSetChanged() on every ~60ms highlight tick, which would
+    // rebuild every visible row and read as flicker/jank during a read.
+    var listView: ListView? = null
+
+    // Read-aloud word-highlight target -- which row, and which character
+    // range within that row's OWN text (see ReadAloudController's
+    // per-section onWordHighlight). Applied both here (for a cheap direct
+    // update when the row is already on screen) and in getView() itself
+    // (so scrolling the highlighted row back into view shows the right
+    // state immediately, matching how expandedIds already survives
+    // recycling).
+    private var highlightRowId: String? = null
+    private var highlightRange: IntRange? = null
+
+    fun setHighlight(rowId: String?, range: IntRange?) {
+        val previousRowId = highlightRowId
+        highlightRowId = rowId
+        highlightRange = range
+        val lv = listView ?: return
+        // Moving to a new row (a new section started, see
+        // ReadAloudController.onSectionChanged) leaves the old row's View
+        // still showing its last-applied highlight span -- ListView
+        // recycles views, so nothing else would ever clear it until that
+        // exact View instance happens to get rebound to different content
+        // (confirmed live 2026-09-09: the previous bubble's highlighted
+        // word stayed highlighted after the read moved on to the next
+        // message). Re-render it with no range first.
+        if (previousRowId != null && previousRowId != rowId) renderRowHighlight(lv, previousRowId, null)
+        renderRowHighlight(lv, rowId, range)
+    }
+
+    /** Cheap in-place update of one row's already-bound TextView, used for
+     * every highlight tick instead of notifyDataSetChanged() (would
+     * rebuild every visible row ~every 60ms -- visible flicker/jank during
+     * a read). Only ever touches a row highlightableText() actually
+     * approves -- a tool bundle, attachment, or a message whose markdown
+     * rendering changed its text can't safely have m.text's offsets
+     * applied to whatever's really on screen, so those are left alone
+     * exactly as getView() last rendered them. */
+    private fun renderRowHighlight(lv: ListView, rowId: String?, range: IntRange?) {
+        if (rowId == null) return
+        val pos = items.indexOfFirst { it.id == rowId }
+        if (pos < 0) return
+        val m = items[pos]
+        val base = highlightableText(m) ?: return
+        val childIdx = pos - lv.firstVisiblePosition
+        if (childIdx !in 0 until lv.childCount) return
+        val holder = lv.getChildAt(childIdx)?.tag as? Holder ?: return
+        val tv = holder.body.getChildAt(0) as? TextView ?: return
+        tv.text = withHighlight(base, range)
+    }
+
+    // The exact text a row's TextView shows when NOT highlighted, only for
+    // rows where read-aloud highlighting can safely apply -- shared between
+    // getView() (initial/recycled bind) and renderRowHighlight() (per-tick
+    // update) so the two can never disagree about what "unhighlighted"
+    // looks like for a given row.
+    private fun highlightableText(m: ChatDisplayRow): CharSequence? {
+        if (m.toolItems != null || m.attachment != null) return null
+        if (m.role == "user") return m.text
+        // Assistant markdown rendering can shift character offsets from
+        // m.text (what ReadAloudController actually sent to the TTS
+        // server and computed word ranges against) -- only safe to
+        // highlight when rendering happens to be a no-op (single segment,
+        // rendered string identical to the raw source), otherwise a
+        // highlight would land on the wrong word or corrupt a
+        // table/multi-segment layout entirely. See MessageAdapter's
+        // getView for the matching fallback when this returns null.
+        val segments = Markdown.renderSegments(m.text, dimColor = Theme.muted)
+        val seg = segments.singleOrNull() as? MdSegment.Text ?: return null
+        return if (seg.spanned.toString() == m.text) seg.spanned else null
+    }
+
+    private fun withHighlight(text: CharSequence, range: IntRange?): CharSequence {
+        if (range == null) return text
+        val sb = SpannableStringBuilder(text)
+        val start = range.first.coerceIn(0, sb.length)
+        val end = (range.last + 1).coerceIn(start, sb.length)
+        if (start < end) sb.setSpan(BackgroundColorSpan(0x552196F3), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        return sb
+    }
 
     // Which individual tool items (inside a bundle) are currently expanded,
     // keyed by ToolCallItem.id -- the transcript line number, stable across
@@ -131,8 +221,6 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
         // textual worth reading, and its own Download text has its own
         // tap target).
         val wantsMessageMenu = !isBundle && !isAttachment && m.text.isNotBlank()
-        holder.bubble.isClickable = wantsMessageMenu
-        holder.bubble.setOnClickListener(if (wantsMessageMenu) { v -> showMessageMenu(v, m) } else null)
 
         holder.role.text = when {
             isError -> when (m.errorType) {
@@ -194,31 +282,75 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
                 holder.body.addView(itemContainer)
             }
         } else if (isUser) {
-            holder.body.addView(plainTextView(m.text, maxWidth))
+            val base = highlightableText(m) ?: m.text
+            val text = if (m.id == highlightRowId) withHighlight(base, highlightRange) else base
+            holder.body.addView(plainTextView(text, maxWidth))
         } else {
-            for (seg in Markdown.renderSegments(m.text, dimColor = Theme.muted)) {
-                when (seg) {
-                    is MdSegment.Text -> if (seg.spanned.isNotEmpty()) {
-                        holder.body.addView(plainTextView(seg.spanned, maxWidth))
+            // highlightableText() null means rendering isn't a safe target
+            // for a read-aloud highlight (real markdown formatting, a
+            // table, ...) -- falls back to the normal unconditional
+            // per-segment render, same as before highlighting existed.
+            // Audio still plays fine either way; see highlightableText's
+            // own doc comment for why.
+            val base = highlightableText(m)
+            if (base != null) {
+                if (base.isNotEmpty()) {
+                    val text = if (m.id == highlightRowId) withHighlight(base, highlightRange) else base
+                    holder.body.addView(plainTextView(text, maxWidth))
+                }
+            } else {
+                for (seg in Markdown.renderSegments(m.text, dimColor = Theme.muted)) {
+                    when (seg) {
+                        is MdSegment.Text -> if (seg.spanned.isNotEmpty()) {
+                            holder.body.addView(plainTextView(seg.spanned, maxWidth))
+                        }
+                        is MdSegment.Table -> holder.body.addView(buildTableView(seg))
                     }
-                    is MdSegment.Table -> holder.body.addView(buildTableView(seg))
                 }
             }
         }
 
-        // A selectable TextView (see plainTextView's setTextIsSelectable)
-        // handles its own touch stream internally (cursor placement, then
-        // long-press-to-select) -- that consumes the gesture before it
-        // ever reaches a parent's OnClickListener (confirmed live: tapping
-        // message text did nothing, and long-pressing it opened the
-        // platform's Copy/Share/Select-all popup, in both cases because
-        // only the bubble had a listener). Wiring the same listener
-        // directly onto each content TextView fixes it the same way.
+        // Single tap opens Copy/Read-aloud; long-press (or double-tap) on a
+        // word instead selects it and hands off to the platform's normal
+        // text-selection controls -- drag handles, extend-selection, and
+        // (since the TextView is selectable, see plainTextView) Android's
+        // built-in Smart Text Selection, which expands a long-press/
+        // double-tap to grab a whole recognized URL/email/etc in one go
+        // instead of stopping at internal punctuation (asked for
+        // explicitly 2026-09-09: "when selecting hyperlinks have that
+        // entire hyperlink select at once").
+        //
+        // Getting both gestures out of ONE selectable TextView needed a
+        // real GestureDetector rather than a plain OnClickListener:
+        // View.OnClickListener/performClick() and a selectable TextView's
+        // own touch handling fight over the same first tap (confirmed
+        // live 2026-09-08 -- opening the menu took two taps, since the
+        // first one was consumed just focusing the view). A GestureDetector
+        // fed through OnTouchListener sees every raw MotionEvent in
+        // parallel -- onSingleTapConfirmed only fires once it's sure the
+        // gesture wasn't the start of a double-tap/long-press, and
+        // returning false from the listener still lets the SAME events
+        // reach the TextView's own Editor afterward for selection.
         if (wantsMessageMenu) {
+            val tapDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
+                override fun onDown(e: MotionEvent) = true // required for onSingleTapConfirmed to ever fire
+                override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                    showMessageMenu(holder.bubble, m)
+                    return true
+                }
+            })
+            val touchListener = View.OnTouchListener { _, event ->
+                tapDetector.onTouchEvent(event)
+                false
+            }
+            holder.bubble.setOnTouchListener(touchListener)
             for (i in 0 until holder.body.childCount) {
-                val child = holder.body.getChildAt(i)
-                child.isClickable = true
-                child.setOnClickListener { v -> showMessageMenu(v, m) }
+                holder.body.getChildAt(i).setOnTouchListener(touchListener)
+            }
+        } else {
+            holder.bubble.setOnTouchListener(null)
+            for (i in 0 until holder.body.childCount) {
+                holder.body.getChildAt(i).setOnTouchListener(null)
             }
         }
 
@@ -464,12 +596,10 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
         val tv = TextView(context)
         tv.textSize = 14f
         tv.setLineSpacing(dp(2).toFloat(), 1f)
-        // NOT selectable (was true) -- a selectable TextView inside a
-        // ListView row needs a first tap just to gain focus before its own
-        // click listener ever fires, so opening the tap-menu took two taps
-        // (reported live 2026-09-08). "Copy message" already covers
-        // copying a whole message; native partial-text selection inside a
-        // bubble is the trade-off for single-tap working reliably.
+        // Selectable again (see the GestureDetector wiring in getView,
+        // which is what makes single-tap-for-menu and native long-press
+        // selection coexist without the earlier two-taps-needed bug).
+        tv.setTextIsSelectable(true)
         tv.setPadding(0, dp(3), 0, 0)
         tv.setTextColor(Theme.onBackground)
         tv.maxWidth = maxWidth

@@ -141,6 +141,9 @@ class TtsPlaybackService : Service() {
     private val mainHandler = Handler(Looper.getMainLooper())
     private var currentTitle: String = "Claude Agents"
     @Volatile private var lastSentenceText: String = "Preparing..."
+    // See setEstimatedDuration's doc - kept in sync with
+    // newsdigest-android's copy of this file.
+    private var estimatedTotalMs: Long = 0L
 
     /** All the places that change `playing` route through here instead of
      * assigning it directly, so HighlightListener.onPlayingChanged fires
@@ -269,6 +272,7 @@ class TtsPlaybackService : Service() {
         stopRequested = false
         idleSignaled = false
         sessionEnded = false
+        estimatedTotalMs = 0L
         synchronized(lock) {
             allSentences.clear()
             playIndex = 0
@@ -299,7 +303,20 @@ class TtsPlaybackService : Service() {
         mediaSession?.setMetadata(
             MediaMetadata.Builder()
                 .putString(MediaMetadata.METADATA_KEY_TITLE, currentTitle)
-                .putLong(MediaMetadata.METADATA_KEY_DURATION, totalMs)
+                .putLong(MediaMetadata.METADATA_KEY_DURATION, maxOf(estimatedTotalMs, totalMs))
+                .build(),
+        )
+    }
+
+    /** See newsdigest-android's copy of this file for the full doc - sets
+     * an upfront word-count-based estimate of the session's total length
+     * so the system media notification has an end-time immediately. */
+    fun setEstimatedDuration(ms: Long) {
+        estimatedTotalMs = ms
+        mediaSession?.setMetadata(
+            MediaMetadata.Builder()
+                .putString(MediaMetadata.METADATA_KEY_TITLE, currentTitle)
+                .putLong(MediaMetadata.METADATA_KEY_DURATION, ms)
                 .build(),
         )
     }
@@ -313,6 +330,14 @@ class TtsPlaybackService : Service() {
 
     fun pause() {
         setPositionAnchor(estimatedPositionMs(), false)
+        // Freeze the highlight anchor at the position it had actually
+        // reached (same rebase setPlaybackSpeed() does before swapping
+        // speed) - highlightAnchorAtNanos is deliberately left stale here,
+        // not reset to now; the highlighter Runnable stops reading either
+        // field entirely while paused (see its own doc), so the stale
+        // value is harmless and resume() is what re-bases it.
+        highlightAnchorMs = highlightAnchorMs +
+            ((System.nanoTime() - highlightAnchorAtNanos) / 1_000_000.0 * playbackSpeed).toLong()
         setPlaying(false)
         audioTrack?.pause()
         updatePlaybackState(PlaybackState.STATE_PAUSED)
@@ -322,6 +347,11 @@ class TtsPlaybackService : Service() {
     fun resume() {
         requestAudioFocus()
         setPositionAnchor(estimatedPositionMs(), true)
+        // Restart the wall-clock baseline from right now, so the elapsed-
+        // time delta the highlighter Runnable computes on its very next
+        // tick doesn't include however long playback was actually paused
+        // for (see pause()'s comment).
+        highlightAnchorAtNanos = System.nanoTime()
         setPlaying(true)
         audioTrack?.play()
         updatePlaybackState(PlaybackState.STATE_PLAYING)
@@ -511,6 +541,26 @@ class TtsPlaybackService : Service() {
                 var idx = 0
                 override fun run() {
                     if (stopRequested || seekGeneration != myGeneration) return
+                    // The write loop below stalls on `!playing` and simply
+                    // stops consuming audio while paused, but this Runnable
+                    // is on its own postDelayed clock and was computing
+                    // elapsed time from raw wall-clock nanoTime() deltas
+                    // regardless of pause state - confirmed live 2026-09-10
+                    // (news digest's copy of this same file): pausing left
+                    // the word highlight silently still advancing (in
+                    // lockstep with real time, not audio) until the next
+                    // sentence's onSentenceStart reset the anchor and it
+                    // "caught back up". While paused, just keep polling
+                    // without advancing - pause()/resume() rebase
+                    // highlightAnchorMs/highlightAnchorAtNanos (same
+                    // freeze-then-restart pattern setPlaybackSpeed already
+                    // uses) so the very next tick after resume continues
+                    // from exactly where this left off, instead of jumping
+                    // forward by however long the pause lasted.
+                    if (!playing) {
+                        mainHandler.postDelayed(this, HIGHLIGHT_TICK_MS)
+                        return
+                    }
                     // Reads playbackSpeed live (not captured at sentence
                     // start) so a mid-sentence speed change takes effect
                     // immediately - setPlaybackSpeed() rebases the anchor

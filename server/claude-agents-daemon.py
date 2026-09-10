@@ -458,11 +458,70 @@ def drain_queue(live_sessions):
             qfile.unlink(missing_ok=True)
 
 
+def _pane_input_box_text(pane_target):
+    """Text currently sitting in Claude Code's own input box (the `> ...`
+    line the CLI draws bounded by its own horizontal-rule border), or None
+    if it can't be determined. Used only to verify Enter actually
+    registered -- tmux send-keys reporting success only means the
+    keystroke was injected into the pty, not that the TUI acted on it."""
+    try:
+        out = subprocess.run(
+            ["tmux", "capture-pane", "-t", pane_target, "-p"],
+            capture_output=True, text=True, timeout=5, check=True,
+        ).stdout
+    except Exception:
+        return None
+    lines = out.rstrip("\n").split("\n")
+
+    def is_rule(s):
+        return bool(s) and set(s) <= {"─", "-"}
+
+    # The input box is bounded by its own top and bottom horizontal-rule
+    # border, always drawn even when the box is empty -- the LAST two rule
+    # lines in the pane are always that pair (confirmed live 2026-09-09:
+    # scanning backward for the first rule line hit the box's *bottom*
+    # border first, immediately below the status-bar footer that follows
+    # it on screen, before ever reaching the "❯ ..." line above it --
+    # always returned "nothing pending" even when something plainly was).
+    rule_indices = [i for i, l in enumerate(lines) if is_rule(l.strip())]
+    if len(rule_indices) < 2:
+        return None
+    top, bottom = rule_indices[-2], rule_indices[-1]
+    for line in lines[top + 1:bottom]:
+        stripped = line.strip()
+        if stripped[:1] in ("❯", ">"):  # "❯" (Claude Code's own prompt glyph) or a plain ">"
+            return stripped[1:].strip()
+    return None
+
+
 def send_to_pane(pane_target, text):
     try:
         subprocess.run(["tmux", "send-keys", "-t", pane_target, "-l", "--", text],
                         check=True, timeout=5)
-        subprocess.run(["tmux", "send-keys", "-t", pane_target, "Enter"], check=True, timeout=5)
+        # A bare "Enter" sent immediately after the literal-text paste can
+        # race Claude Code's own TUI (still processing the bracketed-paste
+        # block) and get silently swallowed -- confirmed live 2026-09-09: a
+        # real message sat typed-but-unsubmitted in a pane for over 11
+        # hours, with tmux send-keys itself reporting success both times
+        # and nothing anywhere signaling the Enter never actually
+        # registered. The fixed delay narrows the race; the verify-and-
+        # retry loop below closes it -- Enter is idempotent against an
+        # already-submitted message (pressing it again on an empty prompt
+        # is a harmless no-op), so retrying is safe even if the check
+        # itself is wrong.
+        time.sleep(0.15)
+        for attempt in range(3):
+            subprocess.run(["tmux", "send-keys", "-t", pane_target, "Enter"], check=True, timeout=5)
+            time.sleep(0.3)
+            pending = _pane_input_box_text(pane_target)
+            # An empty (or unreadable) input box means it submitted --
+            # anything still sitting in it, whether or not it looks exactly
+            # like what we sent, means Enter didn't take and is worth
+            # another try.
+            if not pending:
+                return True
+            log(f"send_to_pane({pane_target}): Enter attempt {attempt + 1} didn't submit (still pending: {pending[:60]!r}), retrying")
+        log(f"send_to_pane({pane_target}): text still appears unsubmitted after 3 Enter attempts -- reporting delivered anyway (tmux itself succeeded); reconcileDeliveredOutbox on the client only retires the row once the real message actually appears")
         return True
     except Exception as e:
         log(f"send_to_pane({pane_target}) failed: {e}")
@@ -636,6 +695,110 @@ def spawn_session(dir_key, initial_text):
         time.sleep(0.5)
     log(f"spawn: transcript for {session_id} never appeared within 15s")
     return session_id, None  # still return it - the session is real, just slow to write its first line
+
+
+def cwd_of_transcript(path):
+    """Best-effort real working directory a transcript's session was
+    started in, read straight from its own per-line "cwd" field (present
+    on every user/assistant message) -- the authoritative source, not a
+    guess decoded from the project directory's own name, which lossily
+    replaces every "/" with "-" and so can't be safely inverted for a
+    real path that itself contains a literal "-". Falls back to $HOME if
+    no line carries one (e.g. a stub transcript with only summary/system
+    lines -- see list_conversations' real_messages==0 filter, which
+    should already keep those out of the archive view, but this is a
+    harmless fallback regardless)."""
+    try:
+        with open(path, "r", errors="ignore") as f:
+            for line in f:
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                cwd = d.get("cwd")
+                if cwd:
+                    return cwd
+    except Exception:
+        pass
+    return str(HOME)
+
+
+# Serializes concurrent /resume calls for the same session_id -- without
+# this, two sends landing in the outbox drain close together for the same
+# closed conversation could each see "not live yet" and both spawn a
+# `claude --resume <id>` tmux session, which corrupts the transcript (two
+# processes writing the same jsonl). Keyed by session_id, created lazily;
+# never removed once created (bounded by the number of distinct
+# conversations ever resumed in this daemon's lifetime, not worth
+# cleaning up).
+_resume_locks = defaultdict(threading.Lock)
+_resume_locks_guard = threading.Lock()
+
+
+def _resume_lock_for(session_id):
+    with _resume_locks_guard:
+        return _resume_locks[session_id]
+
+
+def resume_session(session_id, initial_text):
+    """Relaunches a closed (no live tmux pane) conversation via `claude
+    --resume <session_id>` in a fresh tmux session, run from the same cwd
+    and account the conversation originally used, then primes it with
+    `initial_text` -- the archive view's equivalent of spawn_session for a
+    brand-new conversation. Returns (session_id, error); error is None on
+    success. Safe to call even if another /resume call for the same
+    session_id is racing this one -- see _resume_lock_for."""
+    lock = _resume_lock_for(session_id)
+    with lock:
+        # Re-check live status under the lock: either a racing /resume call
+        # just finished spawning this same session, or an unrelated tmux
+        # pane resumed it manually in the few seconds since the caller's
+        # own live-status check -- either way, deliver into the real pane
+        # instead of spawning a second process against the same session id.
+        live = get_live_sessions().get(session_id)
+        if live:
+            ok = send_to_pane(live["pane"], initial_text)
+            if ok:
+                return session_id, None
+            return None, "session is live but delivering to its pane failed"
+
+        path = find_conversation_path(session_id)
+        if not path:
+            return None, "conversation not found"
+        meta = conversation_meta(path)
+        dir_key = meta.get("account")
+        if dir_key not in ACCOUNT_DIRS:
+            dir_key = "claude"
+        config_dir = str(ACCOUNT_DIRS[dir_key])
+        cwd = cwd_of_transcript(path)
+        if not Path(cwd).is_dir():
+            cwd = str(HOME)
+
+        tmux_session = f"{SPAWN_SESSION_PREFIX}-resume-{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}"
+        argv = [
+            "tmux", "new-session", "-d", "-s", tmux_session,
+            "-c", cwd,
+            "-e", f"CLAUDE_CONFIG_DIR={config_dir}",
+            "--",
+            CLAUDE_BIN, "--dangerously-skip-permissions", "--resume", session_id,
+        ]
+        try:
+            subprocess.run(argv, check=True, capture_output=True, timeout=10)
+        except Exception as e:
+            log(f"resume: tmux new-session failed for {session_id}: {e}")
+            return None, "failed to start session"
+
+        # claude --resume has strictly more to do before its first prompt
+        # is interactive than a brand-new session does (load + replay the
+        # whole prior transcript) -- spawn_session's 2s undershoots this
+        # for anything but a short conversation.
+        time.sleep(4)
+
+        if not send_to_pane(f"{tmux_session}:0.0", initial_text):
+            log(f"resume: initial send to {tmux_session} failed for {session_id}")
+            return None, "session resumed but initial message failed to send"
+
+        return session_id, None
 
 
 def live_scan_loop():
@@ -882,6 +1045,7 @@ def scan_transcript_stats(path):
     real_messages = 0
     last_ts = None
     context_tokens = None
+    ai_title = None
     with open(path, "r", errors="ignore") as f:
         for line in f:
             n += 1
@@ -902,7 +1066,26 @@ def scan_transcript_stats(path):
                         + (usage.get("cache_creation_input_tokens") or 0)
                         + (usage.get("cache_read_input_tokens") or 0)
                     )
-    return n, (parse_iso_ts(last_ts) if last_ts else None), context_tokens, real_messages
+            # Claude Code's own title for this session, written straight
+            # into the transcript once it has enough context to generate
+            # one (this is the exact same field the desktop's claude-history
+            # tool reads for tmux pane titles / the ctrl+alt+c quickshell
+            # panel -- see that tool's parse_session()). Reading it here
+            # directly, in the same forward pass this function already
+            # does, instead of only through load_history_titles()'s copy
+            # of claude-history's own cache (below) -- that cache is only
+            # ever refreshed when someone launches claude-history
+            # interactively on the desktop, so a conversation this app
+            # shows could sit with a stale first-message fallback for
+            # hours after Claude Code itself had already titled it.
+            # Confirmed live 2026-09-10 as the cause of a reported
+            # inconsistency ("some just seem like first messages... we
+            # need to keep them in sync"). A later ai-title line overwrites
+            # an earlier one, matching claude-history's own "last one wins"
+            # behavior.
+            if d.get("type") == "ai-title":
+                ai_title = d.get("aiTitle") or ai_title
+    return n, (parse_iso_ts(last_ts) if last_ts else None), context_tokens, real_messages, ai_title
 
 
 HISTORY_CACHE_PATH = HOME / ".cache" / "claude-history-parse-cache.json"
@@ -949,8 +1132,14 @@ def conversation_meta(path, history_titles=None):
     account_info = ACCOUNT_MAP.get(owner_uuid) if owner_uuid else None
     if history_titles is None:
         history_titles = load_history_titles()
-    title = history_titles.get(path.stem) or first_user_text(path)
-    line_count, last_message_epoch, context_tokens, real_messages = scan_transcript_stats(path)
+    line_count, last_message_epoch, context_tokens, real_messages, ai_title = scan_transcript_stats(path)
+    # Preference order: this transcript's own ai-title line (freshest --
+    # see scan_transcript_stats's doc), then the desktop claude-history
+    # tool's separately cached copy of the same field (covers a session
+    # this daemon hasn't rescanned since its mtime-keyed cache above was
+    # last populated, but claude-history has), then a plain first-message
+    # snippet for anything with no real title yet either way.
+    title = ai_title or history_titles.get(path.stem) or first_user_text(path)
     meta = {
         "id": path.stem,
         "title": title,
@@ -1327,6 +1516,58 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._reject(500, err)
             log(f"spawn: started {session_id} (account={account}) for {ip}")
             return self._ok({"session_id": session_id, "account": account})
+
+        m = re.match(r"^/api/v1/conversations/([0-9a-fA-F-]{36})/resume$", path)
+        if m:
+            # Archive view's send action: the conversation has no live
+            # tmux pane, so relaunch it via `claude --resume` instead of
+            # queuing text at nothing (see resume_session). Same "spawn a
+            # real process" cost as /spawn, so it shares that tighter rate
+            # bucket rather than plain /send's.
+            if rate_limited(ip, "spawn", limit=5, window=60):
+                log(f"deny: resume rate limited {ip}")
+                return self._reject(429, "rate limited")
+            session_id = m.group(1)
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > 1_000_000:
+                return self._reject(400, "bad request")
+            try:
+                body = json.loads(self.rfile.read(length))
+            except Exception:
+                return self._reject(400, "bad json")
+            text = body.get("text")
+            if not isinstance(text, str) or not text.strip():
+                return self._reject(400, "empty text")
+            text = text[:20000]
+            msg_id = body.get("id")
+            if not (isinstance(msg_id, str) and msg_id):
+                msg_id = None
+                log(f"resume: no id from {ip} (older client build) -- can't dedupe a retry of this one")
+
+            if msg_id:
+                replay = lookup_send_result(msg_id)
+                if replay is not None:
+                    log(f"resume: replay id={msg_id} for {session_id} from {ip} (already handled, not re-sent)")
+                    replay = dict(replay)
+                    replay["replayed"] = True
+                    return self._ok(replay)
+
+            live = get_live_sessions().get(session_id)
+            if live:
+                # Already running again by the time this request landed --
+                # deliver like a normal /send instead of resuming a second
+                # process against the same session id.
+                result = deliver_text_to_conversation(session_id, text, msg_id, ip, log_prefix="resume")
+                return self._ok(result)
+
+            new_session_id, err = resume_session(session_id, text)
+            if err:
+                log(f"resume: failed for {session_id} from {ip}: {err}")
+                return self._reject(500, err)
+            result = {"delivered": True, "via": "tmux", "resumed": True}
+            record_send_result(msg_id, session_id, result)
+            log(f"resume: relaunched {session_id} for {ip}")
+            return self._ok(result)
 
         m = re.match(r"^/api/v1/conversations/([0-9a-fA-F-]{36})/send$", path)
         if m:

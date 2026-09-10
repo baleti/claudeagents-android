@@ -6,6 +6,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Color
 import android.graphics.Typeface
 import android.os.Build
 import android.os.Bundle
@@ -37,6 +38,10 @@ class MainActivity : Activity() {
     private var adapter: ConversationAdapter? = null
     private var offlineBanner: TextView? = null
     private var searchPopup: PopupWindow? = null
+    // Null until showListView() builds it (not shown at all on the
+    // pairing screen) -- referenced from onBackPressed below so Back can
+    // clear an in-progress search instead of immediately exiting the app.
+    private var searchInput: EditText? = null
 
     private var pullIndicator: ProgressBar? = null
 
@@ -189,9 +194,27 @@ class MainActivity : Activity() {
         searchPopup?.dismiss()
     }
 
+    // Asked for explicitly 2026-09-10: Back with text still in the search
+    // box should clear the search first, not immediately exit the app (the
+    // default behavior on this screen, being the launcher activity).
+    // setText("") alone is enough -- the field's own TextWatcher already
+    // re-derives searchQuery/applyFilter/updateSearchPopup from it.
+    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+    override fun onBackPressed() {
+        val input = searchInput
+        if (input != null && input.text.isNotEmpty()) {
+            input.setText("")
+            return
+        }
+        super.onBackPressed()
+    }
+
     private fun showOverflowMenu(anchor: View) {
-        Theme.showMenu(this, anchor, listOf("Read aloud settings")) {
-            startActivity(Intent(this, TtsSettingsActivity::class.java))
+        Theme.showMenu(this, anchor, listOf("Archive", "Read aloud settings")) { picked ->
+            when (picked) {
+                "Archive" -> startActivity(Intent(this, ArchiveActivity::class.java))
+                "Read aloud settings" -> startActivity(Intent(this, TtsSettingsActivity::class.java))
+            }
         }
     }
 
@@ -416,6 +439,7 @@ class MainActivity : Activity() {
         root.addView(searchRow, searchRowParams)
 
         val searchInput = EditText(this)
+        this.searchInput = searchInput
         searchInput.hint = "Search… (/fv /s /rv, see query-dsl.md)"
         searchInput.setSingleLine(true)
         searchInput.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
@@ -471,8 +495,17 @@ class MainActivity : Activity() {
         val overflowButton = TextView(this)
         overflowButton.text = "⋮"
         overflowButton.textSize = 20f
+        overflowButton.gravity = Gravity.CENTER
         overflowButton.setTextColor(Theme.onBackground)
-        overflowButton.setPadding(dp(10), dp(4), dp(4), dp(4))
+        // The glyph itself is narrow, and the old padding (10/4/4/4) left a
+        // genuinely small tap target next to it -- reported live 2026-09-09:
+        // "very hard to select". Symmetric padding plus an explicit min
+        // size gives it a real touch target (Android's own guidance is
+        // 48dp minimum) regardless of how little space the "⋮" text needs.
+        overflowButton.setPadding(dp(14), dp(10), dp(14), dp(10))
+        overflowButton.minWidth = dp(44)
+        overflowButton.minHeight = dp(44)
+        overflowButton.background = Theme.rippleOn(Theme.roundedDrawable(Color.TRANSPARENT, this, radiusDp = 20))
         overflowButton.setOnClickListener { showOverflowMenu(overflowButton) }
         val overflowParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         overflowParams.gravity = Gravity.CENTER_VERTICAL
@@ -622,7 +655,6 @@ class MainActivity : Activity() {
         val row = LinearLayout(this)
         row.orientation = LinearLayout.HORIZONTAL
         row.setPadding(dp(12), dp(6), dp(12), dp(6))
-        row.addView(Space(dp(16)))
         row.addView(headerLabel("ACCT", ConversationColumns.account))
         val title = headerLabel("TITLE", 0)
         val titleParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
@@ -635,12 +667,6 @@ class MainActivity : Activity() {
         (ago.layoutParams as LinearLayout.LayoutParams).marginStart = dp(6)
         row.addView(ago)
         return row
-    }
-
-    private fun Space(widthPx: Int): View {
-        val v = View(this)
-        v.layoutParams = LinearLayout.LayoutParams(widthPx, 1)
-        return v
     }
 
     private fun refreshList() {

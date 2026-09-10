@@ -42,7 +42,12 @@ object ConversationColumns {
     }
 }
 
-class ConversationAdapter(private val context: Context) : BaseAdapter() {
+// showTokens = false drops the TKNS column entirely (not just blanked --
+// no reserved width either) -- asked for explicitly 2026-09-10 for the
+// drawer's copy of this list, which is a narrow 300dp quick-switch panel
+// with no room to spare for a column that matters far less there than on
+// the full-width main table.
+class ConversationAdapter(private val context: Context, private val showTokens: Boolean = true) : BaseAdapter() {
     var items: List<ConversationRow> = emptyList()
         set(value) {
             field = value
@@ -54,8 +59,8 @@ class ConversationAdapter(private val context: Context) : BaseAdapter() {
     override fun getItemId(position: Int): Long = items[position].id.hashCode().toLong()
 
     private class Holder(
-        val dot: TextView, val account: TextView, val title: TextView,
-        val tokens: TextView, val ago: TextView
+        val account: TextView, val title: TextView,
+        val tokens: TextView?, val ago: TextView
     )
 
     override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
@@ -72,11 +77,14 @@ class ConversationAdapter(private val context: Context) : BaseAdapter() {
             dataRow.gravity = Gravity.CENTER_VERTICAL
             dataRow.setPadding(dp(12), dp(9), dp(12), dp(9))
 
-            val dot = TextView(context)
-            dot.text = "●"
-            dot.textSize = 11f
-            dataRow.addView(dot, LinearLayout.LayoutParams(dp(16), LinearLayout.LayoutParams.WRAP_CONTENT))
-
+            // No live/dead dot -- every list this adapter ever populates
+            // is already filtered to one liveness state or the other (see
+            // MainActivity/ArchiveActivity/ChatActivity's drawer), so the
+            // dot never actually varied within a single list and just
+            // repeated information the screen itself already establishes
+            // (removed, asked for explicitly 2026-09-10: "i think its
+            // redundant... we are only supposed to show active sessions
+            // anyway").
             val account = TextView(context)
             account.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL)
             account.textSize = 11f
@@ -94,11 +102,16 @@ class ConversationAdapter(private val context: Context) : BaseAdapter() {
             titleParams.marginEnd = dp(8)
             dataRow.addView(title, titleParams)
 
-            val tokens = TextView(context)
-            tokens.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL)
-            tokens.textSize = 11f
-            tokens.gravity = Gravity.END
-            dataRow.addView(tokens, LinearLayout.LayoutParams(dp(ConversationColumns.tokens), LinearLayout.LayoutParams.WRAP_CONTENT))
+            val tokens = if (showTokens) {
+                TextView(context).also {
+                    it.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL)
+                    it.textSize = 11f
+                    it.gravity = Gravity.END
+                    dataRow.addView(it, LinearLayout.LayoutParams(dp(ConversationColumns.tokens), LinearLayout.LayoutParams.WRAP_CONTENT))
+                }
+            } else {
+                null
+            }
 
             val ago = TextView(context)
             ago.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL)
@@ -115,7 +128,7 @@ class ConversationAdapter(private val context: Context) : BaseAdapter() {
             row.addView(divider, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
 
             view = row
-            holder = Holder(dot, account, title, tokens, ago)
+            holder = Holder(account, title, tokens, ago)
             view.tag = holder
         } else {
             view = convertView
@@ -123,14 +136,13 @@ class ConversationAdapter(private val context: Context) : BaseAdapter() {
         }
 
         val c = items[position]
-        holder.dot.setTextColor(if (c.isLive) Theme.live else Theme.muted and 0x66FFFFFF.toInt())
         val isKnownAccount = c.account in setOf("claude", "claude2", "claude3")
         holder.account.text = ConversationColumns.accountNumber(c.account)
         holder.account.setTextColor(if (isKnownAccount) Theme.onSurfaceVariant else Theme.muted and 0x66FFFFFF.toInt())
         holder.title.text = c.title
         holder.title.setTextColor(Theme.onBackground)
-        holder.tokens.text = Fmt.tokens(c.tokens)
-        holder.tokens.setTextColor(Theme.muted)
+        holder.tokens?.text = Fmt.tokens(c.tokens)
+        holder.tokens?.setTextColor(Theme.muted)
         holder.ago.text = Fmt.ago(c.mtime)
         holder.ago.setTextColor(Theme.muted)
         return view

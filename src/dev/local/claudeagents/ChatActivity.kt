@@ -16,6 +16,7 @@ import android.text.Editable
 import android.text.TextWatcher
 import android.view.Gravity
 import android.view.ViewGroup
+import android.widget.AdapterView
 import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
@@ -32,6 +33,29 @@ import java.util.concurrent.atomic.AtomicBoolean
 class ChatActivity : Activity() {
     private lateinit var db: Db
     private lateinit var sessionId: String
+    // True when this screen was opened from the Archive view (the
+    // conversation had no live tmux pane at open time) -- see
+    // ArchiveActivity. Routes every send from this screen through
+    // .../resume instead of .../send (see sendText/OutboxLogic), which
+    // relaunches the conversation via `claude --resume` if it's still not
+    // live by the time the outbox drains. Stays true for the rest of this
+    // screen's lifetime even if the conversation goes live in the
+    // meantime -- the daemon's /resume handles that by delivering straight
+    // into the now-live pane instead of resuming a second time, so there's
+    // no need to track the transition here.
+    private var archivedOrigin: Boolean = false
+    // Left-edge swipe-out panel listing live conversations -- asked for
+    // explicitly 2026-09-10: "so i can switch between them without having
+    // to go back to main screen". Switching never calls finish() on the
+    // conversation being left (see the drawer list's own click handler
+    // below), so each switch just pushes a new ChatActivity instance onto
+    // the normal Android back stack -- system Back therefore already
+    // walks backward through whichever conversations were actually
+    // visited, in order, before finally reaching MainActivity, with no
+    // separate history bookkeeping needed here.
+    private lateinit var drawer: SwipeDrawer
+    private lateinit var drawerListView: ListView
+    private lateinit var drawerAdapter: ConversationAdapter
     private lateinit var listView: ListView
     private lateinit var adapter: MessageAdapter
     private lateinit var input: EditText
@@ -53,6 +77,9 @@ class ChatActivity : Activity() {
     // chat bubbles, not one scrollable article).
     private lateinit var readAloud: ReadAloudController
     private lateinit var playerBar: PlayerControlBar
+    // Parallel to the section list passed to readAloud.start() -- see
+    // readAloudFrom().
+    private var readAloudSectionRowIds: List<String> = emptyList()
 
     companion object {
         private const val PICK_ATTACHMENT_REQUEST = 4201
@@ -87,12 +114,15 @@ class ChatActivity : Activity() {
         super.onCreate(savedInstanceState)
         db = Db.getInstance(this)
         sessionId = intent.getStringExtra("session_id") ?: run { finish(); return }
+        archivedOrigin = intent.getBooleanExtra("archived_origin", false)
         val convTitle = intent.getStringExtra("title") ?: sessionId
 
         val root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
         root.setBackgroundColor(Theme.bg)
-        setContentView(root)
+        // Not attached via setContentView yet -- root becomes the
+        // drawer's main content at the very end of onCreate, once it's
+        // fully built (see SwipeDrawer.setContent below).
         window.statusBarColor = Theme.bg
         window.navigationBarColor = Theme.bg
         actionBar?.hide()
@@ -108,6 +138,9 @@ class ChatActivity : Activity() {
         title.setTypeface(null, Typeface.BOLD)
         title.setTextColor(Theme.onBackground)
         title.maxLines = 2
+        // Asked for explicitly 2026-09-10 -- same clipboard mechanism and
+        // "Copied" toast a message bubble's own long-press/menu copy uses.
+        title.setOnLongClickListener { copyMessage(title.text.toString()); true }
         titleBar.addView(title)
         val divider = View(this)
         divider.setBackgroundColor(Theme.outlineVariant)
@@ -143,6 +176,7 @@ class ChatActivity : Activity() {
         listView.setBackgroundColor(Theme.bg)
         adapter = MessageAdapter(this)
         listView.adapter = adapter
+        adapter.listView = listView
         root.addView(listView, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
         // "just silence" while Claude works was the actual complaint --
@@ -173,12 +207,34 @@ class ChatActivity : Activity() {
         readAloud = ReadAloudController(
             context = this,
             onStateChanged = { active ->
-                if (active) playerBar.show() else playerBar.hide()
+                if (active) {
+                    playerBar.show()
+                } else {
+                    playerBar.hide()
+                    adapter.setHighlight(null, null)
+                }
             },
             onPlayingChanged = { playing -> playerBar.setPlaying(playing) },
+            // One section == one message here (see readAloudFrom) --
+            // moving into a new section means a different message bubble
+            // is now the one being read, so the previous bubble's
+            // highlight needs clearing (the new section's own word-range
+            // highlight arrives moments later via onWordHighlight below).
+            // Also keeps the currently-reading bubble scrolled into view.
+            onSectionChanged = { sectionIndex ->
+                val rowId = readAloudSectionRowIds.getOrNull(sectionIndex)
+                adapter.setHighlight(rowId, null)
+                val pos = adapter.items.indexOfFirst { it.id == rowId }
+                if (pos >= 0) listView.smoothScrollToPosition(pos)
+            },
+            onWordHighlight = { sectionIndex, charStart, charEnd ->
+                val rowId = readAloudSectionRowIds.getOrNull(sectionIndex)
+                if (charEnd > charStart) adapter.setHighlight(rowId, charStart..(charEnd - 1))
+            },
         )
         playerBar = PlayerControlBar(
             context = this,
+            onPreviousSection = { readAloud.skipToPreviousSection() },
             onRewind = { readAloud.seekRelative(-15_000) },
             onPlayPause = {
                 // playerBar's own icon already reflects real playing state
@@ -187,8 +243,19 @@ class ChatActivity : Activity() {
                 if (playerBar.isPlayingIcon()) readAloud.pause() else readAloud.resume()
             },
             onForward = { readAloud.seekRelative(15_000) },
+            onNextSection = { readAloud.skipToNextSection() },
             onSpeedClick = { anchor ->
                 SpeedPicker.show(this, anchor, readAloud.getSpeed()) { speed -> readAloud.setSpeed(speed) }
+            },
+            // Re-scrolls to whichever message is currently being read --
+            // asked for explicitly 2026-09-10. onSectionChanged above
+            // already does this automatically as reading progresses, but
+            // scrolling away to reread something earlier needs a manual
+            // way back to the live position too.
+            onLocate = {
+                val rowId = readAloudSectionRowIds.getOrNull(readAloud.getCurrentSectionIndex())
+                val pos = adapter.items.indexOfFirst { it.id == rowId }
+                if (pos >= 0) listView.smoothScrollToPosition(pos)
             },
         )
         root.addView(playerBar.view)
@@ -215,6 +282,17 @@ class ChatActivity : Activity() {
         // press select with it -- reported live 2026-09-08.
         input.maxLines = 8
         input.isVerticalScrollBarEnabled = true
+        // Restores whatever was typed but not sent last time this
+        // conversation's input was touched -- including after the app
+        // process was killed outright, not just switching away and back
+        // (asked for explicitly 2026-09-09, after an adb force-stop during
+        // testing dropped an in-progress draft: "text ij i put field to
+        // persist even across app getting closed"). See DraftStore.
+        val savedDraft = DraftStore.get(this, sessionId)
+        if (savedDraft.isNotEmpty()) {
+            input.setText(savedDraft)
+            input.setSelection(input.text.length)
+        }
         val inputParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         inputParams.marginEnd = dp(8)
         inputRow.addView(input, inputParams)
@@ -244,7 +322,10 @@ class ChatActivity : Activity() {
         send.setOnClickListener {
             val text = input.text.toString().trim()
             if (text.isEmpty()) return@setOnClickListener
-            if (sendText(text)) input.setText("")
+            if (sendText(text)) {
+                input.setText("")
+                DraftStore.set(this, sessionId, "")
+            }
         }
         actionColumn.addView(send, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         inputRow.addView(actionColumn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
@@ -303,23 +384,77 @@ class ChatActivity : Activity() {
             override fun afterTextChanged(s: Editable?) {
                 updateCommandPopup(input)
                 updateAttachLayout(s?.length ?: 0)
+                // Per-keystroke, not just onPause -- the incident that
+                // prompted this (see DraftStore) was an abrupt process
+                // kill, which skips onPause entirely.
+                DraftStore.set(this@ChatActivity, sessionId, s?.toString() ?: "")
             }
         })
 
         root.addView(inputRow)
+
+        // Left-edge swipe drawer: live conversations, for switching
+        // without leaving this screen (see the `drawer` field's own doc).
+        drawer = SwipeDrawer(this)
+        val drawerRoot = LinearLayout(this)
+        drawerRoot.orientation = LinearLayout.VERTICAL
+        drawerRoot.setBackgroundColor(Theme.surface)
+        val drawerTitle = TextView(this)
+        drawerTitle.text = "Conversations"
+        drawerTitle.textSize = 15f
+        drawerTitle.setTypeface(null, Typeface.BOLD)
+        drawerTitle.setTextColor(Theme.onBackground)
+        drawerTitle.setPadding(dp(16), dp(16), dp(16), dp(10))
+        drawerRoot.addView(drawerTitle)
+        val drawerDivider = View(this)
+        drawerDivider.setBackgroundColor(Theme.outlineVariant)
+        drawerRoot.addView(drawerDivider, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
+        drawerListView = ListView(this)
+        drawerListView.divider = null
+        drawerListView.dividerHeight = 0
+        drawerListView.setBackgroundColor(Theme.surface)
+        drawerAdapter = ConversationAdapter(this, showTokens = false)
+        drawerListView.adapter = drawerAdapter
+        drawerListView.onItemClickListener = AdapterView.OnItemClickListener { _, _, position, _ ->
+            val c = drawerAdapter.items[position]
+            drawer.close()
+            if (c.id == sessionId) return@OnItemClickListener
+            // No finish() here -- switching this way pushes a new instance
+            // onto the back stack instead of replacing this one, which is
+            // exactly what gives Back its "previously opened conversations"
+            // history (see the `drawer` field's own doc).
+            val switchIntent = Intent(this, ChatActivity::class.java)
+            switchIntent.putExtra("session_id", c.id)
+            switchIntent.putExtra("title", c.title)
+            startActivity(switchIntent)
+        }
+        drawerRoot.addView(drawerListView, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        drawer.setDrawerContent(drawerRoot)
+        // Refreshed on every open, not just once at screen-build time --
+        // the whole point is switching to a conversation that may have
+        // only just gone live, or dropping one that closed, since this
+        // screen was first opened.
+        drawer.onOpen = { drawerAdapter.items = db.listConversations().filter { it.isLive } }
+        drawer.setContent(root)
+        setContentView(drawer.root)
     }
 
-    // Shared by the Send button and compactNow() below -- "/compact" is not
-    // a special code path, it's the exact same plain-text send Claude Code's
-    // own CLI already understands from stdin, sent through the exact same
-    // durable-outbox pipeline as anything the human types. insertOutbox now
-    // throws instead of silently swallowing a failed write (see Db.kt) --
-    // this is the one place in the app that must never lose a message with
-    // no trace, so the caller only clears its own input on a confirmed
-    // commit. Returns whether the write succeeded.
+    @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
+    override fun onBackPressed() {
+        if (::drawer.isInitialized && drawer.isOpen()) {
+            drawer.close()
+            return
+        }
+        super.onBackPressed()
+    }
+
+    // insertOutbox throws instead of silently swallowing a failed write
+    // (see Db.kt) -- this is the one place in the app that must never
+    // lose a message with no trace, so the caller only clears its own
+    // input on a confirmed commit. Returns whether the write succeeded.
     private fun sendText(text: String): Boolean {
         try {
-            db.insertOutbox(sessionId, text)
+            db.insertOutbox(sessionId, text, viaResume = archivedOrigin)
         } catch (e: Exception) {
             Toast.makeText(this, "Couldn't save message locally, try again: ${e.message}", Toast.LENGTH_LONG).show()
             return false
@@ -580,11 +715,18 @@ class ChatActivity : Activity() {
         val items = adapter.items
         val startIdx = items.indexOfFirst { it.id == fromId }
         if (startIdx < 0) return
-        val text = items.subList(startIdx, items.size)
-            .filter { it.toolItems == null && it.attachment == null && it.text.isNotBlank() }
-            .joinToString("\n\n") { it.text }
-        if (text.isBlank()) return
-        readAloud.start(intent.getStringExtra("title") ?: sessionId, text)
+        // One section per message (asked for explicitly: "have this app
+        // ... split text into sections, in this app this logically would
+        // be split by messages") -- readAloudSectionRowIds is the parallel
+        // list of each section's own ChatDisplayRow.id, letting
+        // ReadAloudController's index-based onSectionChanged/
+        // onWordHighlight callbacks (it has no idea what a "message" is)
+        // be mapped back to a specific bubble for the highlight overlay.
+        val rows = items.subList(startIdx, items.size)
+            .filter { it.toolItems == null && it.attachment == null && it.text.isNotBlank() && it.id != null }
+        if (rows.isEmpty()) return
+        readAloudSectionRowIds = rows.map { it.id!! }
+        readAloud.start(intent.getStringExtra("title") ?: sessionId, rows.map { it.text })
     }
 
     private var everLoaded = false
@@ -703,11 +845,28 @@ class ChatActivity : Activity() {
         // row now renders exactly where it chronologically belongs,
         // including ahead of real content that arrived first but happened
         // later.
+        // Whether THIS conversation still has a live tmux pane right now --
+        // used below so a "delivered" row's label can say something
+        // truthful once the session it was typed into has since ended
+        // (e.g. the message itself was "/exit"): reported live 2026-09-10,
+        // a message sent while offline stayed "sent — waiting for
+        // response" indefinitely even after the daemon confirmed delivery
+        // and the agent visibly acted on it and the session closed -- the
+        // only way to tell it had actually worked was watching the
+        // conversation disappear from the main list entirely, which this
+        // very screen has no way to notice about itself. Not every
+        // "delivered" message ends the session (most don't, and get
+        // retired normally by reconcileDeliveredOutbox the moment the real
+        // line syncs), so this only overrides the label for the minority
+        // case where the session is already gone by the time this renders.
+        val stillLive = db.getConversation(sessionId)?.isLive ?: true
         val pendingOutbox = db.listOutbox(sessionId)
             .map { row ->
                 val status = when {
                     row.state == "pending" -> "sending…"
                     row.serverState == "queued" -> "queued on server — will send once the session is live"
+                    row.serverState == "delivered" && !stillLive ->
+                        "sent — the session ended before a reply could sync back"
                     row.serverState == "delivered" -> "sent — waiting for response"
                     else -> "sending…"
                 }
@@ -735,7 +894,18 @@ class ChatActivity : Activity() {
             }
         adapter.items = (messages + pendingOutbox + pendingAttachments).sortedBy { it.second }.map { it.first }
         if (nearBottom) {
-            listView.post { listView.setSelection(adapter.count - 1) }
+            listView.post {
+                listView.setSelection(adapter.count - 1)
+                // A single post() isn't always enough on the very first
+                // load of a long conversation (reported live 2026-09-09:
+                // "opened at the top rather than at the bottom") --
+                // variable-height rows (tool bundles, attachments) can
+                // still be mid-measure at that point, so the target
+                // position this resolves to isn't necessarily the real
+                // bottom yet. A second, delayed pass re-asserts it once
+                // layout has actually settled.
+                listView.postDelayed({ listView.setSelection(adapter.count - 1) }, 150)
+            }
         }
     }
 

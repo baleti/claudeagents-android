@@ -2,6 +2,7 @@ package dev.local.claudeagents
 
 import android.content.Context
 import android.graphics.Color
+import android.graphics.Rect
 import android.graphics.drawable.ColorDrawable
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -141,6 +142,23 @@ object Theme {
         popup.contentView = container
         popup.width = LinearLayout.LayoutParams.WRAP_CONTENT
         popup.height = LinearLayout.LayoutParams.WRAP_CONTENT
-        popup.showAsDropDown(anchor)
+
+        // showAsDropDown(anchor) alone always opens straight downward with
+        // no fallback -- tapping a message near the bottom of the screen
+        // left this popup clipped against the screen/keyboard edge with
+        // only its first row actually visible (reported live 2026-09-10:
+        // "only copy message shows up, there is no read aloud message
+        // below it... i think it needs to be higher"). Measure the real
+        // content height first and open upward (bottom-aligned to the
+        // anchor's top) instead whenever there isn't room below it.
+        container.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
+        val popupHeight = container.measuredHeight
+        val anchorLoc = IntArray(2)
+        anchor.getLocationOnScreen(anchorLoc)
+        val visibleFrame = Rect()
+        anchor.getWindowVisibleDisplayFrame(visibleFrame)
+        val spaceBelow = visibleFrame.bottom - (anchorLoc[1] + anchor.height)
+        val yOffset = if (popupHeight > spaceBelow) -(anchor.height + popupHeight) else 0
+        popup.showAsDropDown(anchor, 0, yOffset)
     }
 }

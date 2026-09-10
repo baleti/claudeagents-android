@@ -115,6 +115,22 @@ class RelayClient(context: Context) {
         return request("POST", "/api/v1/conversations/$sessionId/send", body)
     }
 
+    // Archive view's equivalent of send() -- for a conversation with no
+    // live tmux pane, the daemon relaunches it via `claude --resume
+    // <sessionId>` in a fresh tmux session (same cwd/account it originally
+    // used) and primes it with `text`, rather than queuing the text at
+    // nothing (see claude-agents-daemon.py resume_session). If the
+    // conversation turns out to already be live by the time this lands,
+    // the daemon just delivers into the real pane instead, same as send().
+    // Generous timeout to match spawn(): a resumed session has a whole
+    // prior transcript to reload before its first prompt is interactive.
+    fun resume(sessionId: String, text: String, id: String): JSONObject {
+        val body = JSONObject()
+        body.put("text", text)
+        body.put("id", id)
+        return request("POST", "/api/v1/conversations/$sessionId/resume", body, readTimeoutMs = 25000)
+    }
+
     // Same base64-in-JSON shape the daemon expects (see claude-agents-daemon.py --
     // deliberately not multipart, a hand-rolled multipart parser is itself a
     // common source of bugs; base64 via android.util.Base64 (platform, not a

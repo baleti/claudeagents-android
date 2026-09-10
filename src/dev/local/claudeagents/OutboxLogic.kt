@@ -26,7 +26,14 @@ object OutboxLogic {
         val pending = db.listPendingOutbox()
         for (row in pending) {
             try {
-                val resp = client.send(row.conversationId, row.text, row.clientMsgId)
+                // Archive-originated rows resume the (closed) conversation
+                // instead of sending into a pane that doesn't exist -- see
+                // OutboxRow.viaResume / ArchiveActivity.
+                val resp = if (row.viaResume) {
+                    client.resume(row.conversationId, row.text, row.clientMsgId)
+                } else {
+                    client.send(row.conversationId, row.text, row.clientMsgId)
+                }
                 val serverState = if (resp.optBoolean("delivered", false)) "delivered" else "queued"
                 db.markOutboxHandedOff(row.id, serverState)
             } catch (e: Exception) {

@@ -50,13 +50,16 @@ private class NonDestructiveErrorHandler : DatabaseErrorHandler {
     }
 }
 
-// Version 6: adds messages.error_type (daemon-tagged API-error transcript
-// lines -- "context_limit"/"rate_limit"/"api_error", see
-// claude-agents-daemon.py parse_transcript_line). messages is a re-fetchable
-// cache, not a DURABLE_TABLES entry, so the plain drop-and-recreate in
-// onUpgrade is sufficient here -- nothing to preserve or backfill.
+// Version 7: adds outbox.via_resume (Archive view -- see ArchiveActivity/
+// ChatActivity's archivedOrigin -- marks a row for POST .../resume instead
+// of .../send). outbox IS a DURABLE_TABLES entry, so onUpgrade's generic
+// preserve-and-backfill path (below) carries existing pending rows across
+// this migration; they backfill to via_resume=0 (plain /send), which is
+// correct -- a message that was already pending under the old schema was
+// never typed into an archived conversation, since that flow didn't exist
+// yet.
 class Db private constructor(context: Context) : SQLiteOpenHelper(
-    context.applicationContext, "claudeagents.db", null, 6, NonDestructiveErrorHandler()
+    context.applicationContext, "claudeagents.db", null, 7, NonDestructiveErrorHandler()
 ) {
     init {
         // WAL mode: readers (the poll thread, sync, list queries) never
@@ -131,7 +134,8 @@ class Db private constructor(context: Context) : SQLiteOpenHelper(
                 server_state TEXT,
                 created_at INTEGER,
                 attempts INTEGER,
-                client_msg_id TEXT
+                client_msg_id TEXT,
+                via_resume INTEGER NOT NULL DEFAULT 0
             )"""
         )
         db.execSQL(
@@ -225,6 +229,29 @@ class Db private constructor(context: Context) : SQLiteOpenHelper(
         writableDatabase.insertWithOnConflict("conversations", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
     }
 
+    // Single-row lookup -- used to check whether the conversation a chat
+    // screen is showing is still live, e.g. to give an outbox row's status
+    // label something truthful to say once the session it was delivered
+    // into has since ended (see ChatActivity's outbox status computation).
+    fun getConversation(id: String): ConversationRow? {
+        readableDatabase.rawQuery(
+            "SELECT id, account, account_label, title, mtime, line_count, tokens, live_pane FROM conversations WHERE id = ?",
+            arrayOf(id)
+        ).use {
+            if (!it.moveToFirst()) return null
+            return ConversationRow(
+                id = it.getString(0),
+                account = it.getString(1),
+                accountLabel = it.getString(2),
+                title = it.getString(3) ?: "",
+                mtime = it.getDouble(4),
+                lineCount = it.getInt(5),
+                tokens = if (it.isNull(6)) null else it.getInt(6),
+                livePane = it.getString(7)
+            )
+        }
+    }
+
     fun listConversations(): List<ConversationRow> {
         val out = mutableListOf<ConversationRow>()
         val cur = readableDatabase.rawQuery(
@@ -299,7 +326,7 @@ class Db private constructor(context: Context) : SQLiteOpenHelper(
         return out
     }
 
-    fun insertOutbox(conversationId: String, text: String): Long {
+    fun insertOutbox(conversationId: String, text: String, viaResume: Boolean = false): Long {
         val cv = ContentValues().apply {
             put("conversation_id", conversationId)
             put("text", text)
@@ -308,6 +335,7 @@ class Db private constructor(context: Context) : SQLiteOpenHelper(
             put("created_at", System.currentTimeMillis())
             put("attempts", 0)
             put("client_msg_id", java.util.UUID.randomUUID().toString())
+            put("via_resume", if (viaResume) 1 else 0)
         }
         // insertOrThrow, not insert() -- plain insert() swallows a write
         // failure and just returns -1, which is exactly how a message the
@@ -318,41 +346,28 @@ class Db private constructor(context: Context) : SQLiteOpenHelper(
         return writableDatabase.insertOrThrow("outbox", null, cv)
     }
 
+    private val OUTBOX_COLUMNS = "id, conversation_id, text, state, server_state, created_at, attempts, client_msg_id, via_resume"
+
+    private fun cursorToOutboxRow(c: android.database.Cursor): OutboxRow = OutboxRow(
+        c.getLong(0), c.getString(1), c.getString(2), c.getString(3),
+        c.getString(4), c.getLong(5), c.getInt(6), c.getString(7), c.getInt(8) != 0
+    )
+
     fun listOutbox(conversationId: String): List<OutboxRow> {
         val out = mutableListOf<OutboxRow>()
-        val cur = readableDatabase.rawQuery(
-            "SELECT id, conversation_id, text, state, server_state, created_at, attempts, client_msg_id FROM outbox WHERE conversation_id = ? ORDER BY id ASC",
+        readableDatabase.rawQuery(
+            "SELECT $OUTBOX_COLUMNS FROM outbox WHERE conversation_id = ? ORDER BY id ASC",
             arrayOf(conversationId)
-        )
-        cur.use {
-            while (it.moveToNext()) {
-                out.add(
-                    OutboxRow(
-                        it.getLong(0), it.getString(1), it.getString(2), it.getString(3),
-                        it.getString(4), it.getLong(5), it.getInt(6), it.getString(7)
-                    )
-                )
-            }
-        }
+        ).use { c -> while (c.moveToNext()) out.add(cursorToOutboxRow(c)) }
         return out
     }
 
     fun listPendingOutbox(): List<OutboxRow> {
         val out = mutableListOf<OutboxRow>()
-        val cur = readableDatabase.rawQuery(
-            "SELECT id, conversation_id, text, state, server_state, created_at, attempts, client_msg_id FROM outbox WHERE state = 'pending' ORDER BY id ASC",
+        readableDatabase.rawQuery(
+            "SELECT $OUTBOX_COLUMNS FROM outbox WHERE state = 'pending' ORDER BY id ASC",
             null
-        )
-        cur.use {
-            while (it.moveToNext()) {
-                out.add(
-                    OutboxRow(
-                        it.getLong(0), it.getString(1), it.getString(2), it.getString(3),
-                        it.getString(4), it.getLong(5), it.getInt(6), it.getString(7)
-                    )
-                )
-            }
-        }
+        ).use { c -> while (c.moveToNext()) out.add(cursorToOutboxRow(c)) }
         return out
     }
 
