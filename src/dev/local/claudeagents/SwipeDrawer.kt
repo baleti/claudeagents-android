@@ -5,8 +5,6 @@ import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Color
-import android.graphics.drawable.GradientDrawable
-import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
@@ -17,11 +15,12 @@ import kotlin.math.abs
 /**
  * Hand-rolled slide-in-from-left navigation drawer -- no androidx
  * DrawerLayout available in this build (see build.sh's own doc: no
- * dependency resolver, platform SDK + Kotlin stdlib only). Opens via a
- * drag starting near the left edge of the screen (asked for explicitly
- * 2026-09-10: "a list on the left that can be shown by dragging from
- * left screen border"), or programmatically via open(); closes by
- * tapping the dimmed scrim, dragging left while open, or close().
+ * dependency resolver, platform SDK + Kotlin stdlib only). Opens via
+ * open() (the caller wires a tap on a title-bar icon to this -- see
+ * ChatActivity; an edge-swipe-to-open gesture was tried first but
+ * asked to be replaced 2026-09-11 after repeatedly losing the race
+ * against the system's own edge-swipe-back gesture). Closes by tapping
+ * the dimmed scrim, dragging left while already open, or close().
  *
  * Usage: build one per Activity, hand it the screen's normal UI via
  * setContent() and whatever goes in the sliding panel via
@@ -57,7 +56,6 @@ class SwipeDrawer(context: Context, drawerWidthDp: Int = 300) {
      * open) gets claimed away from underlying content, while a plain tap
      * always passes through untouched. */
     inner class ShellView(ctx: Context) : FrameLayout(ctx) {
-        private val edgeZonePx = Theme.dp(ctx, 24)
         private val touchSlop = ViewConfiguration.get(ctx).scaledTouchSlop
         private var downX = 0f
         private var downY = 0f
@@ -71,7 +69,12 @@ class SwipeDrawer(context: Context, drawerWidthDp: Int = 300) {
                     downX = ev.x
                     downY = ev.y
                     dragging = false
-                    eligible = opened || ev.x <= edgeZonePx
+                    // Only a drag starting while the drawer is already open
+                    // is eligible (drag-to-close) -- opening is a tap on the
+                    // title-bar icon now, never a drag, so there's no edge
+                    // zone to intercept and no more conflict with the
+                    // system's own edge-swipe-back gesture.
+                    eligible = opened
                     startTranslation = drawerPanel.translationX
                 }
                 MotionEvent.ACTION_MOVE -> {
@@ -99,54 +102,12 @@ class SwipeDrawer(context: Context, drawerWidthDp: Int = 300) {
             }
             return true
         }
-
-        // Without this, a gesture-navigation Android build's own "swipe
-        // from the very edge = go back" system gesture claims the touch
-        // first and this view's onInterceptTouchEvent above never even
-        // sees it -- confirmed live 2026-09-10: an edge swipe just
-        // finished the Activity (system Back) instead of opening the
-        // drawer. This is the documented fix (View.setSystemGestureExclusionRects,
-        // API 29+, matching this app's own minSdk) for exactly this "app
-        // has its own edge-swipe UI" conflict -- it tells the system to
-        // hand touches starting in this strip to the app instead of
-        // treating them as the system gesture.
-        override fun onLayout(changed: Boolean, l: Int, t: Int, r: Int, b: Int) {
-            super.onLayout(changed, l, t, r, b)
-            if (changed && height > 0) {
-                systemGestureExclusionRects = listOf(android.graphics.Rect(0, 0, edgeZonePx, height))
-            }
-        }
-    }
-
-    // Persistent, always-visible grab tab on the left edge -- asked for
-    // explicitly 2026-09-10: an edge-swipe alone was hard to land
-    // reliably and kept triggering the system's own back gesture instead
-    // (same edge, same gesture shape - see ShellView.onLayout's exclusion-
-    // rect fix, which reduces but evidently doesn't fully eliminate that
-    // conflict for every real touch). A plain TAP on this handle sidesteps
-    // the conflict entirely - the system back gesture only ever fires for
-    // a swipe, never a tap - so this is the reliable path; the handle
-    // stays draggable too since it's just an ordinary part of the
-    // ShellView's touch area.
-    private val handle = View(context).apply {
-        val radius = Theme.dp(context, 10).toFloat()
-        background = GradientDrawable().apply {
-            shape = GradientDrawable.RECTANGLE
-            setColor(Theme.primary)
-            cornerRadii = floatArrayOf(0f, 0f, radius, radius, radius, radius, 0f, 0f)
-        }
-        alpha = 0.75f
-        isClickable = true
-        setOnClickListener { if (opened) close() else open() }
     }
 
     init {
         scrim.setOnClickListener { close() }
         root.addView(scrim, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         root.addView(drawerPanel, FrameLayout.LayoutParams(widthPx, ViewGroup.LayoutParams.MATCH_PARENT))
-        val handleParams = FrameLayout.LayoutParams(Theme.dp(context, 10), Theme.dp(context, 56))
-        handleParams.gravity = Gravity.START or Gravity.CENTER_VERTICAL
-        root.addView(handle, handleParams)
     }
 
     private fun setProgress(translationX: Float) {
@@ -155,7 +116,6 @@ class SwipeDrawer(context: Context, drawerWidthDp: Int = 300) {
         val progress = 1f + clamped / widthPx // 0 (closed) .. 1 (fully open)
         scrim.visibility = if (progress > 0f) View.VISIBLE else View.GONE
         scrim.alpha = progress * 0.5f
-        handle.alpha = 0.75f * (1f - progress)
     }
 
     // Inserted at index 0 -- underneath the scrim/drawer siblings added in
@@ -186,15 +146,12 @@ class SwipeDrawer(context: Context, drawerWidthDp: Int = 300) {
     private fun animateTo(targetTranslation: Float, targetScrimAlpha: Float, onEnd: (() -> Unit)? = null) {
         val startTranslation = drawerPanel.translationX
         val startAlpha = scrim.alpha
-        val startHandleAlpha = handle.alpha
-        val targetHandleAlpha = if (targetScrimAlpha > 0f) 0f else 0.75f
         val animator = ValueAnimator.ofFloat(0f, 1f)
         animator.duration = 220
         animator.addUpdateListener { a ->
             val f = a.animatedValue as Float
             drawerPanel.translationX = startTranslation + (targetTranslation - startTranslation) * f
             scrim.alpha = startAlpha + (targetScrimAlpha - startAlpha) * f
-            handle.alpha = startHandleAlpha + (targetHandleAlpha - startHandleAlpha) * f
         }
         if (onEnd != null) {
             animator.addListener(object : AnimatorListenerAdapter() {

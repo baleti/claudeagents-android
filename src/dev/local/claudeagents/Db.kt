@@ -278,7 +278,36 @@ class Db private constructor(context: Context) : SQLiteOpenHelper(
     }
 
     fun deleteConversation(id: String) {
+        // messages was never actually cleaned up here -- a conversation
+        // routinely disappears from the server's own list (renamed,
+        // compacted, session ended) as normal churn across 300+
+        // conversations, and every single one of those permanently
+        // orphaned its message rows: gone from `conversations` so never
+        // shown anywhere again, but never deleted from `messages` either.
+        // Confirmed live 2026-09-20 while investigating "i hope it is not
+        // accumulating stale data" -- it was. messages is documented
+        // (DURABLE_TABLES's own comment) as "just a re-fetchable cache...
+        // always safe to drop", so this is a pure cleanup with no data-
+        // loss risk. outbox/attachment_outbox are deliberately NOT
+        // touched here -- those are the durable "never lose a pending
+        // send" tables and must survive independent of whether the
+        // conversation row they reference still exists.
+        writableDatabase.delete("messages", "conversation_id = ?", arrayOf(id))
         writableDatabase.delete("conversations", "id = ?", arrayOf(id))
+    }
+
+    /** One-time (well, every sync -- cheap once caught up) retroactive
+     * cleanup for message rows orphaned by deleteConversation()'s
+     * pre-2026-09-20 version, which never deleted from `messages` at
+     * all. Safe for the same reason deleteConversation()'s own cleanup
+     * is: `messages` is just a re-fetchable cache. Returns how many rows
+     * were actually reclaimed, purely for logging. */
+    fun pruneOrphanedMessages(): Int {
+        return writableDatabase.delete(
+            "messages",
+            "conversation_id NOT IN (SELECT id FROM conversations)",
+            null,
+        )
     }
 
     fun getMaxLine(conversationId: String): Int {

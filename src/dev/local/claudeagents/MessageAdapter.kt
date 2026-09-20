@@ -15,6 +15,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
 import android.widget.BaseAdapter
+import android.widget.HorizontalScrollView
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
@@ -332,14 +333,31 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
         // returning false from the listener still lets the SAME events
         // reach the TextView's own Editor afterward for selection.
         if (wantsMessageMenu) {
+            // Tracked from ACTION_DOWN, in holder.bubble's own local
+            // space, converted from whichever child view actually
+            // received the touch (the listener below is shared across
+            // the bubble and every one of its body children) -- lets the
+            // popup open right where the finger was instead of always at
+            // the bubble's own top/bottom edge (asked for explicitly
+            // 2026-09-12).
+            var tapX = 0f
+            var tapY = 0f
             val tapDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
                 override fun onDown(e: MotionEvent) = true // required for onSingleTapConfirmed to ever fire
                 override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
-                    showMessageMenu(holder.bubble, m)
+                    showMessageMenu(holder.bubble, tapX, tapY, m)
                     return true
                 }
             })
-            val touchListener = View.OnTouchListener { _, event ->
+            val touchListener = View.OnTouchListener { v, event ->
+                if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                    val vLoc = IntArray(2)
+                    v.getLocationOnScreen(vLoc)
+                    val bubbleLoc = IntArray(2)
+                    holder.bubble.getLocationOnScreen(bubbleLoc)
+                    tapX = event.x + (vLoc[0] - bubbleLoc[0])
+                    tapY = event.y + (vLoc[1] - bubbleLoc[1])
+                }
                 tapDetector.onTouchEvent(event)
                 false
             }
@@ -360,9 +378,9 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
         return view
     }
 
-    private fun showMessageMenu(anchor: View, m: ChatDisplayRow) {
+    private fun showMessageMenu(anchor: View, tapX: Float, tapY: Float, m: ChatDisplayRow) {
         val activity = context as? ChatActivity ?: return
-        Theme.showMenu(context, anchor, listOf("Copy message", "Read aloud from here")) { choice ->
+        Theme.showMenu(context, anchor, listOf("Copy message", "Read aloud from here"), tapX.toInt(), tapY.toInt()) { choice ->
             when (choice) {
                 "Copy message" -> activity.copyMessage(m.text)
                 "Read aloud from here" -> m.id?.let { activity.readAloudFrom(it) }
@@ -648,7 +666,18 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
             addRow(padded, false)
         }
 
-        container.addView(grid)
+        // Table columns are WRAP_CONTENT with no cap, so a wide table (many
+        // columns, or long cell content) can render wider than the screen
+        // -- reported 2026-09-11 as unreadable with no way to see the rest.
+        // A HorizontalScrollView here just lets that overflow be panned to
+        // instead of silently clipped; it never fires for a table that
+        // already fits, since a ScrollView with no scrollable excess is a
+        // no-op wrapper.
+        val scroller = HorizontalScrollView(context)
+        scroller.isFillViewport = false
+        scroller.overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
+        scroller.addView(grid, ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        container.addView(scroller)
         return container
     }
 }

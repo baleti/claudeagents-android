@@ -53,5 +53,10 @@
             android:exported="false"
             android:label="Read aloud" />
 
+        <activity
+            android:name=".AppSettingsActivity"
+            android:exported="false"
+            android:label="Settings" />
+
     </application>
 </manifest>

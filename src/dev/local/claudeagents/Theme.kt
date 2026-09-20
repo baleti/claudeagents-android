@@ -103,7 +103,13 @@ object Theme {
     // (every view is built in code, same as CommandRowAdapter/SpeedPicker/
     // PlayerControlBar). A plain PopupWindow over a rounded, dark
     // LinearLayout matches those existing hand-built popups instead.
-    fun showMenu(context: Context, anchor: View, items: List<String>, onSelect: (String) -> Unit) {
+    // tapX/tapY, when given, are the tap's own coordinates within
+    // `anchor`'s local space -- asked for explicitly 2026-09-12 ("appears
+    // at the place where i clicked instead of at the top/bottom of the
+    // message"). Null (every other caller -- overflow menus with no
+    // specific tap point) keeps the original anchor-edge behavior
+    // unchanged.
+    fun showMenu(context: Context, anchor: View, items: List<String>, tapX: Int? = null, tapY: Int? = null, onSelect: (String) -> Unit) {
         val container = LinearLayout(context)
         container.orientation = LinearLayout.VERTICAL
         container.background = roundedDrawable(popupSurface, context, radiusDp = 12, strokeColor = primary)
@@ -153,10 +159,34 @@ object Theme {
         // anchor's top) instead whenever there isn't room below it.
         container.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
         val popupHeight = container.measuredHeight
+        val popupWidth = container.measuredWidth
         val anchorLoc = IntArray(2)
         anchor.getLocationOnScreen(anchorLoc)
         val visibleFrame = Rect()
         anchor.getWindowVisibleDisplayFrame(visibleFrame)
+
+        if (tapX != null && tapY != null) {
+            // Open right where the finger actually was, not the anchor's
+            // edge -- same up/down-clip fallback as below, worked out in
+            // absolute screen coordinates since the tap point can be
+            // anywhere inside the anchor, not just at a fixed edge of it.
+            val absTapX = anchorLoc[0] + tapX
+            val absTapY = anchorLoc[1] + tapY
+            val spaceBelow = visibleFrame.bottom - absTapY
+            val spaceAbove = absTapY - visibleFrame.top
+            val absY = when {
+                popupHeight <= spaceBelow -> absTapY
+                popupHeight <= spaceAbove -> absTapY - popupHeight
+                spaceBelow >= spaceAbove -> visibleFrame.bottom - popupHeight
+                else -> visibleFrame.top
+            }
+            val absX = absTapX.coerceIn(visibleFrame.left, (visibleFrame.right - popupWidth).coerceAtLeast(visibleFrame.left))
+            // showAsDropDown's offsets are relative to the anchor's own
+            // bottom-left corner, not absolute screen coordinates.
+            popup.showAsDropDown(anchor, absX - anchorLoc[0], absY - (anchorLoc[1] + anchor.height))
+            return
+        }
+
         val spaceBelow = visibleFrame.bottom - (anchorLoc[1] + anchor.height)
         val yOffset = if (popupHeight > spaceBelow) -(anchor.height + popupHeight) else 0
         popup.showAsDropDown(anchor, 0, yOffset)

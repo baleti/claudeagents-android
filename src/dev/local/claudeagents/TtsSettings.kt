@@ -28,4 +28,26 @@ object TtsSettings {
     fun setTtsEngine(context: Context, engine: String) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString("tts_engine", engine).apply()
     }
+
+    // null means "let the server pick its own default voice for the
+    // current engine" (see server.py's KokoroEngine.synthesize) -- most
+    // engines/voices haven't been explicitly chosen by every user, and a
+    // hardcoded fallback here could silently drift from the server's own.
+    fun getTtsVoice(context: Context): String? =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("tts_voice", null)
+
+    fun setTtsVoice(context: Context, voice: String?) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString("tts_voice", voice).apply()
+    }
+
+    // Which speech-to-text model /stt/transcribe should use -- see
+    // server.py's STT_ENGINES. Exposed as a settings choice purely for
+    // testing/comparing the three while this feature is new (asked for
+    // explicitly 2026-09-12); "whisper-medium-cpu" is the balanced default.
+    fun getSttModel(context: Context): String =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("stt_model", "whisper-medium-cpu") ?: "whisper-medium-cpu"
+
+    fun setSttModel(context: Context, model: String) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString("stt_model", model).apply()
+    }
 }

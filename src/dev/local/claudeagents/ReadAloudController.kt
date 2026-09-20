@@ -10,6 +10,11 @@ import android.os.Looper
 import android.util.Log
 import org.json.JSONObject
 
+// Generic fallback before any real synth_ms data exists at all - start()
+// replaces this with an engine-aware guess the moment it knows which
+// engine (see start()'s own doc).
+private const val DEFAULT_ESTIMATE_MS = 4000L
+
 /**
  * Wires a WebSocketClient (against the shared TTS server's /tts/stream --
  * see newsdigest-android/server/server.py, already general-purpose: it
@@ -49,6 +54,20 @@ class ReadAloudController(
     // range a caller would slice out of that one section's own source
     // text to know what to highlight in whatever view represents it.
     private val onWordHighlight: (sectionIndex: Int, charStart: Int, charEnd: Int) -> Unit = { _, _, _ -> },
+    // Fires true (with a live best-guess of how many ms the wait will be)
+    // right when start() is called and again after a sentence finishes
+    // playing with nothing queued yet to follow it; false once the next
+    // one actually starts. Chatterbox in particular can take 5-15s to
+    // synthesize a sentence - streaming means that gap is expected, but
+    // with no visual cue it reads as the app having frozen rather than
+    // still working (reported live 2026-09-11: "20 second breaks with no
+    // warning"). The estimate is a rolling average of this session's own
+    // observed synth_ms per sentence, seeded with a generic per-engine
+    // guess before any real data exists - ported from newsdigest-android's
+    // own ReadAloudController/SynthesizingBanner, which already solved
+    // this same gap there. Optional - callers that don't care about
+    // showing a "still generating..." indicator can leave it out.
+    private val onGenerating: (generating: Boolean, estimatedMs: Long) -> Unit = { _, _ -> },
 ) {
     private var ttsService: TtsPlaybackService? = null
     private var bound = false
@@ -62,6 +81,21 @@ class ReadAloudController(
 
     private var sections: List<String> = emptyList()
     @Volatile private var currentSectionIndex = 0
+    // True for the life of a live-mode session (see start()'s `live` param)
+    // -- when the currently-known last section finishes, the "done"
+    // handler in streamCurrentSection() leaves the session running instead
+    // of calling svc.endSession(), so TtsPlaybackService's own play loop
+    // just idles (see its `sessionEnded` doc) rather than firing the real
+    // onQueueIdle "playback stopped" event. appendSections() is how a
+    // caller (ChatActivity, once its poll loop notices new messages)
+    // supplies more text to keep going.
+    @Volatile private var liveMode = false
+    // True exactly when a live-mode session has run out of known sections
+    // and is sitting idle waiting for appendSections() to supply more --
+    // distinguishes that from "still streaming/playing a known section",
+    // so appendSections() only kicks off a new stream when one is actually
+    // needed rather than racing an in-flight one.
+    @Volatile private var stalledAtEnd = false
 
     // Word-highlight search state, reset at the start of EACH section
     // (unlike newsdigest, which resets once for the whole document --
@@ -72,11 +106,26 @@ class ReadAloudController(
     private var currentSentenceStartOffset = 0
     private var currentWordRanges: List<IntRange> = emptyList()
 
+    // Rolling average of synth_ms across this controller's own observed
+    // sentences (kept across separate start() calls in the same Activity,
+    // not just within one session).
+    @Volatile private var avgSynthMs: Long = DEFAULT_ESTIMATE_MS
+    private var synthSampleCount = 0
+
+    private fun recordSynthMs(ms: Long) {
+        if (ms <= 0) return
+        synthSampleCount++
+        // Weight recent samples more heavily so the estimate adapts if
+        // the server's pace changes mid-session (e.g. a GPU warming up).
+        avgSynthMs = if (synthSampleCount == 1) ms else (avgSynthMs * 3 + ms) / 4
+    }
+
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private val playbackListener = object : TtsPlaybackService.HighlightListener {
         override fun onSentenceStart(text: String, words: List<WordTiming>, startMs: Long) {
             mainHandler.post {
+                onGenerating(false, 0L)
                 val sectionText = sections.getOrNull(currentSectionIndex) ?: return@post
                 var idx = sectionText.indexOf(text, searchCursor)
                 if (idx < 0) idx = sectionText.indexOf(text) // shouldn't happen; best effort
@@ -108,7 +157,9 @@ class ReadAloudController(
             }
         }
 
-        override fun onSentenceEnd() {}
+        override fun onSentenceEnd() {
+            mainHandler.post { onGenerating(true, avgSynthMs) }
+        }
 
         override fun onPlayingChanged(playing: Boolean) {
             mainHandler.post { this@ReadAloudController.onPlayingChanged.invoke(playing) }
@@ -116,6 +167,7 @@ class ReadAloudController(
 
         override fun onQueueIdle() {
             mainHandler.post {
+                onGenerating(false, 0L)
                 if (active) {
                     active = false
                     onStateChanged.invoke(false)
@@ -182,13 +234,29 @@ class ReadAloudController(
 
     /** title shows in the media notification. Each entry in `sections` is
      * read in order, chained seamlessly onto one continuous playback
-     * session -- see streamCurrentSection(). */
-    fun start(title: String, sections: List<String>) {
+     * session -- see streamCurrentSection(). `live`: when the last known
+     * section finishes, keep the session open and wait for appendSections()
+     * to supply more (asked for explicitly 2026-09-13: reading should keep
+     * up with a conversation that's still producing new messages, e.g.
+     * Claude still typing or a new one the user sends) rather than ending
+     * the read the instant it catches up to "everything there was when I
+     * pressed play". */
+    fun start(title: String, sections: List<String>, live: Boolean = false) {
         stop()
         this.sections = sections
+        this.liveMode = live
+        this.stalledAtEnd = false
         currentSectionIndex = 0
         active = true
         onStateChanged.invoke(true)
+        if (synthSampleCount == 0) {
+            // No real data yet at all (first read this activity has done) -
+            // seed with an engine-aware guess rather than the generic
+            // default, so the very first estimate isn't wildly off for
+            // Chatterbox in particular.
+            avgSynthMs = if (TtsSettings.getTtsEngine(context) == "chatterbox") 10_000L else 2_000L
+        }
+        onGenerating(true, avgSynthMs) // nothing synthesized yet either - same "still working" state as a mid-read gap
 
         val svc = ttsService
         if (svc == null) {
@@ -227,7 +295,28 @@ class ReadAloudController(
         currentSectionIndex += 1
         ws?.close() // stop the old section's remaining sentences from arriving after the new one's
         svc.jumpToUpcoming()
+        onGenerating(true, avgSynthMs)
         streamCurrentSection(svc)
+    }
+
+    /** Adds more text to read once it becomes available, for a session
+     * started with `live = true` -- called by ChatActivity's poll loop
+     * when it notices new messages synced in after the last one this
+     * session already knew about. A no-op outside live mode, or if there's
+     * nothing to add. Only actually kicks off a new stream if playback had
+     * genuinely caught up and was waiting (stalledAtEnd) -- otherwise the
+     * new section is just appended to the backlog and the section
+     * currently in flight will reach it naturally once it finishes. */
+    fun appendSections(newSections: List<String>) {
+        if (newSections.isEmpty() || !liveMode) return
+        sections = sections + newSections
+        if (stalledAtEnd) {
+            val svc = ttsService ?: return
+            stalledAtEnd = false
+            currentSectionIndex += 1
+            onGenerating(false, 0L)
+            streamCurrentSection(svc)
+        }
     }
 
     /** Same as skipToNextSection() but backwards -- jumps to the start of
@@ -238,6 +327,7 @@ class ReadAloudController(
         currentSectionIndex -= 1
         ws?.close()
         svc.jumpToUpcoming()
+        onGenerating(true, avgSynthMs)
         streamCurrentSection(svc)
     }
 
@@ -297,6 +387,7 @@ class ReadAloudController(
                     client.sendText(JSONObject().apply {
                         put("text", text)
                         put("engine", TtsSettings.getTtsEngine(context))
+                        TtsSettings.getTtsVoice(context)?.let { put("voice", it) }
                     }.toString())
                     mainHandler.post { reportPosition(client) }
                 }
@@ -310,6 +401,17 @@ class ReadAloudController(
                             if (idx + 1 < sections.size) {
                                 currentSectionIndex = idx + 1
                                 streamCurrentSection(svc)
+                            } else if (liveMode) {
+                                // Nothing more to read YET -- don't end the
+                                // session, just wait. TtsPlaybackService's
+                                // play loop idles without firing the real
+                                // "stopped" callback as long as endSession()
+                                // was never called, so playback UI stays in
+                                // its normal "still working" gap state
+                                // (same one a mid-section synthesis gap
+                                // already shows) rather than flipping back
+                                // to a stopped Read Aloud button.
+                                stalledAtEnd = true
                             } else {
                                 svc.endSession()
                             }
@@ -339,6 +441,7 @@ class ReadAloudController(
                         }
                     }
                     svc.enqueueSentence(meta.getString("text"), words, data, meta.getInt("sample_rate"))
+                    recordSynthMs(meta.optLong("synth_ms", -1))
                 }
 
                 override fun onFailure(error: Throwable) {
@@ -355,6 +458,9 @@ class ReadAloudController(
 
     fun stop() {
         active = false
+        liveMode = false
+        stalledAtEnd = false
+        onGenerating(false, 0L)
         streamGeneration++
         ws?.close()
         ws = null

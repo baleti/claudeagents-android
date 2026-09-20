@@ -1,11 +1,16 @@
 package dev.local.claudeagents
 
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.animation.ValueAnimator
 import android.app.Activity
 import android.content.BroadcastReceiver
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.graphics.Color
+import android.graphics.PorterDuff
 import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
@@ -15,11 +20,16 @@ import android.provider.OpenableColumns
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.Gravity
+import android.view.MotionEvent
+import android.view.ViewConfiguration
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.widget.AdapterView
 import android.widget.BaseAdapter
 import android.widget.Button
 import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ListView
 import android.widget.PopupWindow
@@ -29,6 +39,7 @@ import android.widget.Toast
 import android.view.View
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.math.abs
 
 class ChatActivity : Activity() {
     private lateinit var db: Db
@@ -54,8 +65,17 @@ class ChatActivity : Activity() {
     // visited, in order, before finally reaching MainActivity, with no
     // separate history bookkeeping needed here.
     private lateinit var drawer: SwipeDrawer
+    private lateinit var swipeNav: SwipeNavFrame
+    private lateinit var synthBanner: SynthesizingBanner
     private lateinit var drawerListView: ListView
     private lateinit var drawerAdapter: ConversationAdapter
+    // Same search box/DSL filtering as MainActivity's conversation list
+    // (asked for explicitly 2026-09-11) -- own state here rather than
+    // reusing MainActivity's fields since this is a second, independent
+    // list (live conversations only, scoped to the drawer panel).
+    private var drawerAllConversations: List<ConversationRow> = emptyList()
+    private var drawerSearchQuery: String = ""
+    private var drawerSearchPopup: PopupWindow? = null
     private lateinit var listView: ListView
     private lateinit var adapter: MessageAdapter
     private lateinit var input: EditText
@@ -132,6 +152,30 @@ class ChatActivity : Activity() {
         val titleBar = LinearLayout(this)
         titleBar.orientation = LinearLayout.VERTICAL
         titleBar.setPadding(dp(16), dp(14), dp(16), dp(10))
+        val titleRow = LinearLayout(this)
+        titleRow.orientation = LinearLayout.HORIZONTAL
+        titleRow.gravity = Gravity.CENTER_VERTICAL
+        // Drawer toggle -- replaces the earlier edge-swipe gesture (asked
+        // for explicitly 2026-09-11, after it kept losing the race against
+        // the system's own edge-swipe-back gesture). Same hand-built
+        // glyph-button idiom MainActivity's own overflow "⋮" button uses --
+        // no ImageView/drawable asset needed. `drawer` is a lateinit field
+        // not assigned until later in onCreate, which is fine here since
+        // this listener only runs on a later tap, well after onCreate
+        // finishes.
+        val drawerToggle = TextView(this)
+        drawerToggle.text = "☰"
+        drawerToggle.textSize = 18f
+        drawerToggle.gravity = Gravity.CENTER
+        drawerToggle.setTextColor(Theme.onBackground)
+        drawerToggle.setPadding(dp(10), dp(8), dp(10), dp(8))
+        drawerToggle.minWidth = dp(40)
+        drawerToggle.minHeight = dp(40)
+        drawerToggle.background = Theme.rippleOn(Theme.roundedDrawable(Color.TRANSPARENT, this, radiusDp = 20))
+        drawerToggle.setOnClickListener { if (drawer.isOpen()) drawer.close() else drawer.open() }
+        val drawerToggleParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        drawerToggleParams.marginEnd = dp(8)
+        titleRow.addView(drawerToggle, drawerToggleParams)
         val title = TextView(this)
         title.text = convTitle
         title.textSize = 15f
@@ -141,7 +185,8 @@ class ChatActivity : Activity() {
         // Asked for explicitly 2026-09-10 -- same clipboard mechanism and
         // "Copied" toast a message bubble's own long-press/menu copy uses.
         title.setOnLongClickListener { copyMessage(title.text.toString()); true }
-        titleBar.addView(title)
+        titleRow.addView(title, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        titleBar.addView(titleRow)
         val divider = View(this)
         divider.setBackgroundColor(Theme.outlineVariant)
         titleBar.addView(divider, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)).also { it.topMargin = dp(10) })
@@ -170,10 +215,23 @@ class ChatActivity : Activity() {
         contextBannerView = contextBanner
         contextBannerLabel = contextLabel
 
+        synthBanner = SynthesizingBanner(this)
+        root.addView(synthBanner.view)
+
         listView = ListView(this)
         listView.divider = null
         listView.dividerHeight = 0
         listView.setBackgroundColor(Theme.bg)
+        // Hidden until loadCached()'s first pass has actually scrolled to
+        // the bottom -- that scroll only takes effect inside a post()
+        // (and a delayed second pass after it), so the very first frame(s)
+        // would otherwise render at the default top position and visibly
+        // jump down a moment later. Always harmless before that first
+        // reveal since there's nothing on screen yet to hide. Reported
+        // live 2026-09-12 as a post-swipe flicker -- the swipe's own
+        // preview was already correctly scrolled, making the jump far
+        // more noticeable than it was on a plain cold-open.
+        listView.visibility = View.INVISIBLE
         adapter = MessageAdapter(this)
         listView.adapter = adapter
         adapter.listView = listView
@@ -212,6 +270,7 @@ class ChatActivity : Activity() {
                 } else {
                     playerBar.hide()
                     adapter.setHighlight(null, null)
+                    synthBanner.stop()
                 }
             },
             onPlayingChanged = { playing -> playerBar.setPlaying(playing) },
@@ -231,18 +290,23 @@ class ChatActivity : Activity() {
                 val rowId = readAloudSectionRowIds.getOrNull(sectionIndex)
                 if (charEnd > charStart) adapter.setHighlight(rowId, charStart..(charEnd - 1))
             },
+            onGenerating = { generating, estimatedMs ->
+                if (generating) synthBanner.start(estimatedMs) else synthBanner.stop()
+            },
         )
         playerBar = PlayerControlBar(
             context = this,
             onPreviousSection = { readAloud.skipToPreviousSection() },
-            onRewind = { readAloud.seekRelative(-15_000) },
+            // 10s, not 15 -- asked for explicitly 2026-09-20 ("these were
+            // supposed to nudge playback by only small 10 seconds").
+            onRewind = { readAloud.seekRelative(-10_000) },
             onPlayPause = {
                 // playerBar's own icon already reflects real playing state
                 // via onPlayingChanged above, so it's the source of truth
                 // here rather than tracking a second local flag.
                 if (playerBar.isPlayingIcon()) readAloud.pause() else readAloud.resume()
             },
-            onForward = { readAloud.seekRelative(15_000) },
+            onForward = { readAloud.seekRelative(10_000) },
             onNextSection = { readAloud.skipToNextSection() },
             onSpeedClick = { anchor ->
                 SpeedPicker.show(this, anchor, readAloud.getSpeed()) { speed -> readAloud.setSpeed(speed) }
@@ -330,14 +394,25 @@ class ChatActivity : Activity() {
         actionColumn.addView(send, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         inputRow.addView(actionColumn, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
-        val attach = Button(this)
-        attach.text = "📎"
-        attach.isAllCaps = false
-        Theme.styleGhostButton(attach, this)
-        attach.minWidth = 0
-        attach.minimumWidth = 0
-        attach.setPadding(dp(12), dp(6), dp(12), dp(6))
-        attach.setOnClickListener {
+        // A plain attach-clip icon, not the "⋮" overflow button this used
+        // to be -- that was a menu of two choices ("Attach file"/
+        // "Dictate"), but dictation now lives only in the standalone
+        // Dictate launcher app (system-wide, via the assist gesture), so
+        // there's just one action left here and no menu to open. Asked
+        // for explicitly 2026-09-12.
+        val more = ImageView(this)
+        run {
+            val id = resources.getIdentifier("ic_attach", "drawable", packageName)
+            if (id != 0) {
+                more.setImageDrawable(getDrawable(id))
+                more.setColorFilter(Theme.onBackground, PorterDuff.Mode.SRC_IN)
+            }
+        }
+        more.scaleType = ImageView.ScaleType.FIT_CENTER
+        more.setPadding(dp(10), dp(10), dp(10), dp(10))
+        more.background = Theme.rippleOn(Theme.roundedDrawable(Color.TRANSPARENT, this, radiusDp = 16))
+
+        more.setOnClickListener {
             pendingAttachmentCaption = input.text.toString().trim()
             val intent = Intent(Intent.ACTION_OPEN_DOCUMENT)
             intent.addCategory(Intent.CATEGORY_OPENABLE)
@@ -350,32 +425,18 @@ class ChatActivity : Activity() {
             }
         }
 
-        // Starts side-by-side (matches input's initial empty state) --
-        // placed directly here rather than through updateAttachLayout
-        // below, since that function only *moves* the button on a state
-        // change and there's no previous state yet to change from.
-        // updateAttachLayout handles every placement after this one, as
-        // length crosses either threshold while typing/deleting.
-        var attachStacked = false
+        // Always stays in the input row, next to the input field -- used
+        // to move into the stacked action column once the input got long
+        // enough, but that made it jump below Send while typing (asked
+        // for explicitly 2026-09-12: "no longer gets moved to below send
+        // button when input field gets higher"). One compact button
+        // fits fine here regardless of input length now that it isn't
+        // two separate buttons anymore.
         run {
-            val params = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-            params.marginEnd = dp(8)
-            inputRow.addView(attach, 0, params)
-        }
-        fun updateAttachLayout(charLength: Int) {
-            val shouldStack = if (attachStacked) charLength >= 60 else charLength >= 80
-            if (shouldStack == attachStacked) return
-            attachStacked = shouldStack
-            (attach.parent as? LinearLayout)?.removeView(attach)
-            if (shouldStack) {
-                val params = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                params.topMargin = dp(6)
-                actionColumn.addView(attach, params)
-            } else {
-                val params = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-                params.marginEnd = dp(8)
-                inputRow.addView(attach, 0, params)
-            }
+            val size = dp(44)
+            val params = LinearLayout.LayoutParams(size, size)
+            params.marginEnd = dp(4)
+            inputRow.addView(more, 0, params)
         }
 
         input.addTextChangedListener(object : TextWatcher {
@@ -383,7 +444,6 @@ class ChatActivity : Activity() {
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
             override fun afterTextChanged(s: Editable?) {
                 updateCommandPopup(input)
-                updateAttachLayout(s?.length ?: 0)
                 // Per-keystroke, not just onPause -- the incident that
                 // prompted this (see DraftStore) was an abrupt process
                 // kill, which skips onPause entirely.
@@ -405,7 +465,38 @@ class ChatActivity : Activity() {
         drawerTitle.setTypeface(null, Typeface.BOLD)
         drawerTitle.setTextColor(Theme.onBackground)
         drawerTitle.setPadding(dp(16), dp(16), dp(16), dp(10))
+        // Tapping the "Conversations" label itself jumps to the main
+        // conversation list -- asked for explicitly 2026-09-11, as a
+        // shortcut out of the drawer separate from picking a specific
+        // conversation from it. Ripple so it reads as tappable.
+        drawerTitle.isClickable = true
+        drawerTitle.background = Theme.rippleOn(Theme.roundedDrawable(Color.TRANSPARENT, this))
+        drawerTitle.setOnClickListener {
+            drawer.close()
+            goToMainMenu()
+        }
         drawerRoot.addView(drawerTitle)
+        // Same search box/DSL filtering as MainActivity's conversation
+        // list -- asked for explicitly 2026-09-11.
+        val drawerSearchInput = EditText(this)
+        drawerSearchInput.hint = "Search… (/fv /s /rv, see query-dsl.md)"
+        drawerSearchInput.setSingleLine(true)
+        drawerSearchInput.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
+        Theme.styleEditText(drawerSearchInput, this)
+        val drawerSearchParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        drawerSearchParams.leftMargin = dp(12)
+        drawerSearchParams.rightMargin = dp(12)
+        drawerSearchParams.bottomMargin = dp(8)
+        drawerRoot.addView(drawerSearchInput, drawerSearchParams)
+        drawerSearchInput.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                drawerSearchQuery = s?.toString() ?: ""
+                drawerAdapter.items = QueryDsl.apply(drawerAllConversations, drawerSearchQuery)
+                updateDrawerSearchPopup(drawerSearchInput)
+            }
+        })
         val drawerDivider = View(this)
         drawerDivider.setBackgroundColor(Theme.outlineVariant)
         drawerRoot.addView(drawerDivider, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
@@ -434,9 +525,58 @@ class ChatActivity : Activity() {
         // the whole point is switching to a conversation that may have
         // only just gone live, or dropping one that closed, since this
         // screen was first opened.
-        drawer.onOpen = { drawerAdapter.items = db.listConversations().filter { it.isLive } }
-        drawer.setContent(root)
+        drawer.onOpen = {
+            drawerAllConversations = db.listConversations().filter { it.isLive }
+            drawerAdapter.items = QueryDsl.apply(drawerAllConversations, drawerSearchQuery)
+        }
+        // Swipe left/right between conversations, tracked live rather than
+        // just detected on release -- asked for explicitly 2026-09-11
+        // ("show next conversation from the side appearing while making
+        // the swiping gesture", after an initial version that only played
+        // a canned slide *after* the gesture ended). Wraps the whole
+        // screen (not just the message list) since the preview it reveals
+        // is a full adjacent conversation, title bar included -- see
+        // SwipeNavFrame's own doc.
+        swipeNav = SwipeNavFrame(this)
+        swipeNav.setContent(root)
+        drawer.setContent(swipeNav)
         setContentView(drawer.root)
+    }
+
+    private fun updateDrawerSearchPopup(anchor: EditText) {
+        val suggestions = if (drawerSearchQuery.isEmpty()) emptyList() else QueryDsl.suggestions(drawerAllConversations, drawerSearchQuery)
+        if (suggestions.isEmpty()) {
+            drawerSearchPopup?.dismiss()
+            return
+        }
+        val listView = ListView(this)
+        listView.divider = null
+        listView.dividerHeight = 0
+        listView.setBackgroundColor(Theme.surface)
+        listView.adapter = SuggestionRowAdapter(this, suggestions)
+        listView.setOnItemClickListener { _, _, position, _ ->
+            val s = suggestions[position]
+            val from = QueryDsl.replaceFrom(drawerSearchQuery)
+            val newText = drawerSearchQuery.substring(0, from) + s.insertText
+            anchor.setText(newText)
+            anchor.setSelection(newText.length)
+        }
+        val popup = drawerSearchPopup ?: PopupWindow(this).also {
+            it.isOutsideTouchable = true
+            it.isFocusable = false
+            it.setBackgroundDrawable(Theme.roundedDrawable(Theme.surface, this, strokeColor = Theme.outlineVariant))
+            drawerSearchPopup = it
+        }
+        popup.contentView = listView
+        val rowHeightPx = Theme.dp(this, 40)
+        val popupHeight = rowHeightPx * suggestions.size.coerceAtMost(6)
+        if (popup.isShowing) {
+            popup.update(anchor.width, popupHeight)
+        } else {
+            popup.width = anchor.width
+            popup.height = popupHeight
+            popup.showAsDropDown(anchor, 0, 0)
+        }
     }
 
     @Suppress("DEPRECATION", "OVERRIDE_DEPRECATION")
@@ -445,7 +585,294 @@ class ChatActivity : Activity() {
             drawer.close()
             return
         }
+        // Asked for explicitly 2026-09-11 (AppSettingsActivity's own
+        // radio choice): either walk backward through whichever
+        // conversations were actually visited (the existing default --
+        // every switch here pushes rather than finishes, see the
+        // `drawer` field's own doc), or always drop straight back to the
+        // main list regardless of how many were visited.
+        if (AppSettings.getBackToMainMenu(this)) {
+            goToMainMenu()
+            return
+        }
         super.onBackPressed()
+    }
+
+    // Reused by both the drawer-title tap and the "always go straight to
+    // the main list" back-button setting. CLEAR_TOP + SINGLE_TOP reuses
+    // the existing MainActivity instance (calling onNewIntent, not a
+    // fresh onCreate) and finishes everything above it in one shot --
+    // MainActivity's own onResume already refreshes its list, so nothing
+    // else needs to react here.
+    private fun goToMainMenu() {
+        val intent = Intent(this, MainActivity::class.java)
+        intent.flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+        startActivity(intent)
+    }
+
+    // "Newer"/"older" means position in the same mtime-DESC ordering
+    // every other list in this app already uses (Db.listConversations()
+    // itself, MainActivity, ArchiveActivity, the drawer) -- index 0 is
+    // always the most recently active conversation. Scoped to whichever
+    // set this screen was opened from (live vs archived, via
+    // archivedOrigin) rather than always the live set, so swiping through
+    // an archived conversation's history doesn't unexpectedly jump into
+    // live ones and vice versa.
+    //
+    // No finish() here, same as the drawer's own switch -- asked for
+    // explicitly 2026-09-10 that switching conversations should push onto
+    // the back stack rather than replace, so Back walks backward through
+    // whichever conversations were actually visited.
+    //
+    // `idx - delta`, not `idx + delta` -- reversed 2026-09-11 per direct
+    // feedback that the original direction ("swipe left = newer") felt
+    // backwards. delta's own sign still just means "which way did the
+    // finger drag" (SwipeNavFrame owns every bit of geometry keyed off
+    // that), so this is the one and only place that decides which
+    // conversation a given drag direction actually leads to.
+    private fun resolveNavigationTarget(delta: Int): ConversationRow? {
+        val scoped = db.listConversations().filter { it.isLive != archivedOrigin }
+        val idx = scoped.indexOfFirst { it.id == sessionId }
+        if (idx < 0) return null
+        return scoped.getOrNull(idx - delta)
+    }
+
+    // withTransition=false is what SwipeNavFrame's own live drag uses --
+    // by the time it commits, the drag has already visually delivered the
+    // "next conversation slides in" transition itself, so the new
+    // Activity should just appear with no further animation on top of
+    // that (overridePendingTransition(0, 0), not "no override at all" --
+    // the latter would let Android's own default transition play instead).
+    private fun navigateConversation(delta: Int, withTransition: Boolean = true) {
+        val target = resolveNavigationTarget(delta)
+        if (target == null) {
+            if (withTransition) {
+                Toast.makeText(this, if (delta < 0) "No older conversation" else "No newer conversation", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+        val switchIntent = Intent(this, ChatActivity::class.java)
+        switchIntent.putExtra("session_id", target.id)
+        switchIntent.putExtra("title", target.title)
+        switchIntent.putExtra("archived_origin", archivedOrigin)
+        startActivity(switchIntent)
+        if (withTransition) {
+            // No R.java in this build (see build.sh's own doc), so these --
+            // like every other resource this app loads at runtime -- are
+            // looked up by name via getIdentifier() rather than referenced
+            // as generated constants.
+            val res = resources
+            val (enterName, exitName) = if (delta < 0) {
+                "slide_in_from_right" to "slide_out_to_left"
+            } else {
+                "slide_in_from_left" to "slide_out_to_right"
+            }
+            val enterId = res.getIdentifier(enterName, "anim", packageName)
+            val exitId = res.getIdentifier(exitName, "anim", packageName)
+            if (enterId != 0 && exitId != 0) {
+                @Suppress("DEPRECATION")
+                overridePendingTransition(enterId, exitId)
+            }
+        } else {
+            @Suppress("DEPRECATION")
+            overridePendingTransition(0, 0)
+        }
+    }
+
+    // A lightweight, read-only stand-in for a neighboring conversation's
+    // own screen -- title + its real messages via the same MessageAdapter
+    // the real screen uses, just without input row/player bar/polling.
+    // Built once per drag (on first crossing the horizontal-drag
+    // threshold), not per touch-move -- the DB read + markdown rendering
+    // this does is the same cost loadCached() already pays once per real
+    // screen open, so doing it once per gesture here is consistent with
+    // what this app already treats as an acceptable synchronous cost.
+    private fun buildConversationPreview(target: ConversationRow): View {
+        val dp = { v: Int -> Theme.dp(this, v) }
+        val container = LinearLayout(this)
+        container.orientation = LinearLayout.VERTICAL
+        container.setBackgroundColor(Theme.bg)
+
+        val titleBar = LinearLayout(this)
+        titleBar.orientation = LinearLayout.VERTICAL
+        titleBar.setPadding(dp(16), dp(14), dp(16), dp(10))
+        val title = TextView(this)
+        title.text = target.title
+        title.textSize = 15f
+        title.setTypeface(null, Typeface.BOLD)
+        title.setTextColor(Theme.onBackground)
+        title.maxLines = 2
+        titleBar.addView(title)
+        val divider = View(this)
+        divider.setBackgroundColor(Theme.outlineVariant)
+        titleBar.addView(divider, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)).also { it.topMargin = dp(10) })
+        container.addView(titleBar)
+
+        val previewList = ListView(this)
+        previewList.divider = null
+        previewList.dividerHeight = 0
+        previewList.setBackgroundColor(Theme.bg)
+        previewList.isEnabled = false
+        val previewAdapter = MessageAdapter(this)
+        val rawMessages = db.listMessages(target.id).filterNot { it.role == "user" && ATTACHMENT_REF_RE.containsMatchIn(it.text) }
+        previewAdapter.items = groupToolCallsWithResults(rawMessages)
+        previewList.adapter = previewAdapter
+        container.addView(previewList, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+        previewList.post { previewList.setSelection(previewAdapter.count - 1) }
+
+        return container
+    }
+
+    // Live-tracked swipe navigation -- asked for explicitly 2026-09-11
+    // ("show next conversation from the side appearing while making the
+    // swiping gesture"), replacing an earlier version that only played a
+    // canned slide animation *after* the gesture already ended. Wraps the
+    // whole screen (see setContent below) rather than just the message
+    // list, since what it reveals is a full adjacent conversation.
+    //
+    // Same onInterceptTouchEvent dx-vs-dy technique as SwipeDrawer's
+    // ShellView (see its own doc): a clearly-horizontal drag steals the
+    // gesture, a vertical one (ordinary scrolling) never does.
+    private inner class SwipeNavFrame(ctx: Context) : FrameLayout(ctx) {
+        private val touchSlop = ViewConfiguration.get(ctx).scaledTouchSlop
+        private var content: View? = null
+        private var downX = 0f
+        private var downY = 0f
+        private var dragging = false
+        // While an animation from a just-finished gesture is still
+        // settling (commit or spring-back), a new gesture is ignored
+        // rather than interrupting it -- simpler than mid-flight
+        // cancellation, and a settle only takes ~180ms.
+        private var settling = false
+        private var delta = 0
+        private var previewView: View? = null
+
+        fun setContent(view: View) {
+            content = view
+            addView(view, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        }
+
+        private fun screenWidth(): Float {
+            val w = width
+            return (if (w > 0) w else resources.displayMetrics.widthPixels).toFloat()
+        }
+
+        override fun onInterceptTouchEvent(ev: MotionEvent): Boolean {
+            if (settling) return false
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = ev.x
+                    downY = ev.y
+                    dragging = false
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (dragging) return true
+                    val dx = ev.x - downX
+                    val dy = ev.y - downY
+                    if (abs(dx) > touchSlop && abs(dx) > abs(dy)) {
+                        // delta's sign here just tracks the drag's own
+                        // physical direction (-1 for a leftward drag, +1
+                        // for rightward) and drives every animation/
+                        // geometry calculation below and in settle() --
+                        // which conversation that direction actually
+                        // navigates to is decided separately, in
+                        // resolveNavigationTarget() (see its own doc for
+                        // why). Resolved (and a preview built) right here,
+                        // once, rather than at release -- if there's
+                        // genuinely nowhere to go this direction, the
+                        // gesture is left alone entirely (not intercepted
+                        // at all) so it falls through to normal scrolling
+                        // instead of dragging against a dead end.
+                        val d = if (dx < 0) -1 else 1
+                        val target = resolveNavigationTarget(d)
+                        if (target != null) {
+                            delta = d
+                            val preview = buildConversationPreview(target)
+                            preview.translationX = if (d < 0) screenWidth() else -screenWidth()
+                            addView(preview, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+                            previewView = preview
+                            dragging = true
+                        }
+                    }
+                }
+                else -> {}
+            }
+            return dragging
+        }
+
+        override fun onTouchEvent(ev: MotionEvent): Boolean {
+            if (!dragging) return false
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_MOVE -> {
+                    val w = screenWidth()
+                    val dx = (ev.x - downX).coerceIn(-w, w)
+                    content?.translationX = dx
+                    previewView?.translationX = dx + (if (delta < 0) w else -w)
+                }
+                MotionEvent.ACTION_UP -> {
+                    dragging = false
+                    settle((ev.x - downX).coerceIn(-screenWidth(), screenWidth()))
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    dragging = false
+                    settle(0f)
+                }
+                else -> {}
+            }
+            return true
+        }
+
+        // Finishes the drag the rest of the way -- either fully into the
+        // next conversation (crossed the commit fraction) or back to rest
+        // -- over a short animation, then commits or cleans up. A sixth
+        // of the screen, not the original third -- reported live
+        // 2026-09-12 as "takes quite a long gesture" to actually switch.
+        private fun settle(dx: Float) {
+            val w = screenWidth()
+            val commit = abs(dx) >= w / 6f
+            settling = true
+            val startContent = content?.translationX ?: 0f
+            val startPreview = previewView?.translationX ?: 0f
+            val endContent = if (commit) (if (delta < 0) -w else w) else 0f
+            val endPreview = if (commit) 0f else (if (delta < 0) w else -w)
+            val animator = ValueAnimator.ofFloat(0f, 1f)
+            animator.duration = 180
+            animator.addUpdateListener { a ->
+                val f = a.animatedValue as Float
+                content?.translationX = startContent + (endContent - startContent) * f
+                previewView?.translationX = startPreview + (endPreview - startPreview) * f
+            }
+            animator.addListener(object : AnimatorListenerAdapter() {
+                override fun onAnimationEnd(animation: Animator) {
+                    settling = false
+                    if (commit) {
+                        // Reported live 2026-09-11: resetting content back
+                        // to translationX=0 here (immediately, before the
+                        // new Activity has actually appeared) made the old
+                        // conversation flash back into full view for a
+                        // frame, since removing the preview and snapping
+                        // content back happened while this screen was
+                        // still the one on-screen -- the new Activity's
+                        // window doesn't actually cover it until some time
+                        // after startActivity() returns. Left exactly as
+                        // the animation ended (content off-screen, preview
+                        // filling the screen) instead; resetVisualState()
+                        // does the actual cleanup once this Activity is
+                        // genuinely no longer visible (see onPause()).
+                        navigateConversation(delta, withTransition = false)
+                    } else {
+                        resetVisualState()
+                    }
+                }
+            })
+            animator.start()
+        }
+
+        fun resetVisualState() {
+            previewView?.let { removeView(it) }
+            previewView = null
+            content?.translationX = 0f
+        }
     }
 
     // insertOutbox throws instead of silently swallowing a failed write
@@ -681,6 +1108,13 @@ class ChatActivity : Activity() {
         super.onPause()
         polling.set(false)
         commandPopup?.dismiss()
+        drawerSearchPopup?.dismiss()
+        // See SwipeNavFrame.settle()'s own doc -- a committed swipe
+        // leaves the visual state mid-transition on purpose (content
+        // off-screen, preview covering it) until this Activity is
+        // genuinely no longer the one visible, which onPause is the
+        // correct signal for.
+        if (::swipeNav.isInitialized) swipeNav.resetVisualState()
         try {
             unregisterReceiver(changedReceiver)
         } catch (e: IllegalArgumentException) {
@@ -723,10 +1157,56 @@ class ChatActivity : Activity() {
         // onWordHighlight callbacks (it has no idea what a "message" is)
         // be mapped back to a specific bubble for the highlight overlay.
         val rows = items.subList(startIdx, items.size)
-            .filter { it.toolItems == null && it.attachment == null && it.text.isNotBlank() && it.id != null }
+            .filter {
+                // outbox_-prefixed rows are a transient optimistic echo of
+                // a not-yet-synced send -- reading one aloud is fine, but
+                // its real synced line later shows up as a DIFFERENT row
+                // id, which would otherwise read as a brand new section
+                // and get spoken a second time. Skip the placeholder;
+                // the real line reads it once it actually syncs, same as
+                // any of Claude's own messages.
+                it.toolItems == null && it.attachment == null && it.text.isNotBlank() &&
+                    it.id != null && !it.id.startsWith("outbox_")
+            }
         if (rows.isEmpty()) return
         readAloudSectionRowIds = rows.map { it.id!! }
-        readAloud.start(intent.getStringExtra("title") ?: sessionId, rows.map { it.text })
+        // live = true -- this conversation's tmux pane can keep producing
+        // new messages for as long as it stays open (Claude still working,
+        // or the user sending more while it reads), so Read Aloud should
+        // keep following along rather than stopping the moment it catches
+        // up to whatever existed when play was pressed. See
+        // extendReadAloudIfActive(), called from loadCached() whenever a
+        // poll brings in new rows.
+        readAloud.start(intent.getStringExtra("title") ?: sessionId, rows.map { it.text }, live = true)
+    }
+
+    /** Feeds any newly-synced messages after the last one Read Aloud
+     * already knows about into the running session, if one is active --
+     * called every time loadCached() rebuilds the row list. No-op if Read
+     * Aloud isn't running, or if nothing new qualifies. Same row filter
+     * readAloudFrom() uses (skip tool bundles/attachments/blank text) so a
+     * live-followed read never suddenly tries to speak one of those. */
+    private fun extendReadAloudIfActive() {
+        if (!readAloud.isActive()) return
+        val lastId = readAloudSectionRowIds.lastOrNull() ?: return
+        val items = adapter.items
+        val lastIdx = items.indexOfFirst { it.id == lastId }
+        if (lastIdx < 0) return
+        val newRows = items.subList(lastIdx + 1, items.size)
+            .filter {
+                // outbox_-prefixed rows are a transient optimistic echo of
+                // a not-yet-synced send -- reading one aloud is fine, but
+                // its real synced line later shows up as a DIFFERENT row
+                // id, which would otherwise read as a brand new section
+                // and get spoken a second time. Skip the placeholder;
+                // the real line reads it once it actually syncs, same as
+                // any of Claude's own messages.
+                it.toolItems == null && it.attachment == null && it.text.isNotBlank() &&
+                    it.id != null && !it.id.startsWith("outbox_")
+            }
+        if (newRows.isEmpty()) return
+        readAloudSectionRowIds = readAloudSectionRowIds + newRows.map { it.id!! }
+        readAloud.appendSections(newRows.map { it.text })
     }
 
     private var everLoaded = false
@@ -783,14 +1263,28 @@ class ChatActivity : Activity() {
 
     private fun loadCached() {
         // Auto-scroll to the newest message only if the user was already
-        // at (or near) the bottom -- otherwise a poll/outbox update while
-        // they've scrolled up to check something earlier yanks the view
+        // genuinely at the bottom -- otherwise a poll/outbox update while
+        // they've scrolled up to reread something earlier yanks the view
         // back down out from under them. Always scrolls on the very first
         // load for this activity instance (nothing to preserve yet), since
-        // lastVisiblePosition is unreliable before the list's first layout
-        // pass has actually happened.
-        val nearBottom = !everLoaded ||
-            (adapter.count > 0 && listView.lastVisiblePosition >= adapter.count - 2)
+        // there's no prior scroll position to protect.
+        //
+        // Reported live 2026-09-11: the earlier version of this check
+        // ("lastVisiblePosition within 2 of the last index") could read as
+        // "near bottom" while genuinely scrolled well up -- message bubbles
+        // are variable-height (tool bundles, tables, attachments), so being
+        // within 2 *items* of the end is not the same as being within 2
+        // *screens*. Checking the actual last item's own pixel bottom
+        // against the list's viewport is what "at the bottom" really means
+        // and isn't fooled by tall trailing rows.
+        val isFirstLoad = !everLoaded
+        val nearBottom = isFirstLoad || run {
+            if (adapter.count == 0) return@run true
+            val lastPos = listView.lastVisiblePosition
+            if (lastPos != adapter.count - 1) return@run false
+            val lastChild = listView.getChildAt(listView.childCount - 1) ?: return@run false
+            lastChild.bottom <= listView.height + Theme.dp(this, 4)
+        }
         everLoaded = true
 
         // The reference line an attachment's own upload generates
@@ -893,6 +1387,7 @@ class ChatActivity : Activity() {
                 ChatDisplayRow("user", row.caption, status, id = "attachment_${row.id}", attachment = info) to row.createdAt
             }
         adapter.items = (messages + pendingOutbox + pendingAttachments).sortedBy { it.second }.map { it.first }
+        extendReadAloudIfActive()
         if (nearBottom) {
             listView.post {
                 listView.setSelection(adapter.count - 1)
@@ -905,6 +1400,36 @@ class ChatActivity : Activity() {
                 // bottom yet. A second, delayed pass re-asserts it once
                 // layout has actually settled.
                 listView.postDelayed({ listView.setSelection(adapter.count - 1) }, 150)
+
+                // Reveals the list once its scroll position is actually
+                // confirmed correct, rather than guessing a fixed delay
+                // is enough -- a hardcoded timer (the first version of
+                // this) still let a visible jump through under load,
+                // reported live 2026-09-12 as a flicker right after a
+                // swipe. onPreDraw fires before every draw pass and can
+                // cancel it (returning false), so this holds the list
+                // hidden across however many frames it actually takes,
+                // re-asserting the scroll each time, with a capped
+                // attempt count only as a last-resort safety valve
+                // against staying invisible forever if something's off.
+                if (isFirstLoad) {
+                    var attempts = 0
+                    listView.viewTreeObserver.addOnPreDrawListener(object : ViewTreeObserver.OnPreDrawListener {
+                        override fun onPreDraw(): Boolean {
+                            attempts++
+                            val settled = adapter.count == 0 || listView.lastVisiblePosition == adapter.count - 1
+                            if (settled || attempts > 15) {
+                                if (listView.viewTreeObserver.isAlive) {
+                                    listView.viewTreeObserver.removeOnPreDrawListener(this)
+                                }
+                                listView.visibility = View.VISIBLE
+                                return true
+                            }
+                            listView.setSelection(adapter.count - 1)
+                            return false
+                        }
+                    })
+                }
             }
         }
     }

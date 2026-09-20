@@ -43,6 +43,23 @@ class MainActivity : Activity() {
     // clear an in-progress search instead of immediately exiting the app.
     private var searchInput: EditText? = null
 
+    // A second ReadAloudController bound to the SAME TtsPlaybackService a
+    // ChatActivity may have started -- asked for explicitly 2026-09-20
+    // ("media player... should be shown [in] main menu after i started
+    // playing something"). TtsPlaybackService already outlives whichever
+    // ChatActivity started it (real foreground service, own notification -
+    // see its own doc), and ReadAloudController.bind()'s onServiceConnected
+    // already detects and reflects an already-running session for ANY
+    // fresh controller instance that binds to it, not just the one that
+    // started it (see that check's own doc) - this is exactly that
+    // mechanism, reused here instead of built new. No word-highlighting or
+    // section-scroll wiring, since there's no message list open on this
+    // screen to highlight anything in; the transport controls (play/pause/
+    // seek/skip/speed) still work normally regardless, since they operate
+    // on the controller/service, not on anything specific to this screen.
+    private lateinit var mainReadAloud: ReadAloudController
+    private lateinit var mainPlayerBar: PlayerControlBar
+
     private var pullIndicator: ProgressBar? = null
 
     // Full unfiltered list from the local cache, re-fetched on every
@@ -57,6 +74,7 @@ class MainActivity : Activity() {
     private var searchQuery: String = ""
     private var syncSpinner: View? = null
     private var syncLabel: TextView? = null
+    private var totalCountLabel: TextView? = null
     // Whether a round is actively running right now -- kept separate from
     // the "Synced N ago" text so the two compose instead of one replacing
     // the other: while syncing, the label still shows how stale the data
@@ -114,6 +132,26 @@ class MainActivity : Activity() {
         override fun run() {
             adapter?.notifyDataSetChanged()
             updateSyncStatusLabel()
+            // Reported live 2026-09-12: a conversation that ended on
+            // host3 (its live pane closing) didn't show up as no-longer-
+            // live until this screen was left and reopened -- onResume's
+            // own scheduleImmediate() only ever fired once, at the
+            // moment this screen was first shown, so nothing re-checked
+            // afterward while it just sat here open. Riding the same
+            // already-running 30s tick this screen uses for the AGE
+            // column keeps it actually catching up while visible, not
+            // just on first open. scheduleImmediate() is safe to call
+            // repeatedly -- SyncJobService.IMMEDIATE_JOB_ID is a fixed
+            // job id, so this replaces any still-pending one rather than
+            // stacking duplicates.
+            if (TokenStore.isPaired(this@MainActivity)) {
+                SyncJobService.scheduleImmediate(this@MainActivity)
+                // Same reasoning as onResume's direct call -- JobScheduler
+                // dispatch is real (if usually short) latency this screen
+                // shouldn't have to wait through every 30s while it's
+                // already sitting open in the foreground.
+                Thread { SyncLogic.performSync(this@MainActivity) }.apply { isDaemon = true; name = "AgeTickSync"; start() }
+            }
             ageTickHandler.postDelayed(this, 30_000)
         }
     }
@@ -168,6 +206,25 @@ class MainActivity : Activity() {
             // time this build runs, without needing to re-pair.
             SyncJobService.schedulePeriodic(this)
             SyncJobService.scheduleImmediate(this)
+            // scheduleImmediate() above still goes through JobScheduler's
+            // own dispatch, which is NOT actually instant -- even a
+            // minimumLatency(0)/overrideDeadline(0) job is subject to
+            // real (if usually short) scheduling overhead, and can be
+            // pushed out further right after a cold app launch before the
+            // process is fully "woken up" for job eligibility. Reported
+            // live 2026-09-13 ("opening the app only to find out it is
+            // still unsynced") -- SyncLogic.performSync() was already
+            // written to be callable directly for exactly this case (see
+            // its own doc: "MainActivity's manual refresh (immediate,
+            // foreground)") but nothing here was actually doing that; it
+            // only ever went through the JobScheduler path. Calling it
+            // directly on a plain background thread skips that dispatch
+            // latency entirely -- as fast as the real network round-trip
+            // allows, which on this WireGuard link is well under a
+            // second. Safe to run alongside the JobScheduler-triggered
+            // call: performSync()'s own `syncing` guard coalesces if both
+            // land close together.
+            Thread { SyncLogic.performSync(this) }.apply { isDaemon = true; name = "MainSyncNow"; start() }
         }
         // Refreshed synchronously here, not just left to the recurring
         // tick below -- reported stuck at a stale "synced Ns ago" that
@@ -194,6 +251,16 @@ class MainActivity : Activity() {
         searchPopup?.dismiss()
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        // Same as ChatActivity's own onDestroy -- only detaches this
+        // Activity's ServiceConnection, doesn't stop playback (a real
+        // foreground service with its own notification keeps it going
+        // regardless). ::mainReadAloud.isInitialized guards the pairing
+        // screen, where showListView() (and therefore this) never ran.
+        if (::mainReadAloud.isInitialized) mainReadAloud.unbind()
+    }
+
     // Asked for explicitly 2026-09-10: Back with text still in the search
     // box should clear the search first, not immediately exit the app (the
     // default behavior on this screen, being the launcher activity).
@@ -210,10 +277,11 @@ class MainActivity : Activity() {
     }
 
     private fun showOverflowMenu(anchor: View) {
-        Theme.showMenu(this, anchor, listOf("Archive", "Read aloud settings")) { picked ->
+        Theme.showMenu(this, anchor, listOf("Archive", "Read aloud settings", "Settings")) { picked ->
             when (picked) {
                 "Archive" -> startActivity(Intent(this, ArchiveActivity::class.java))
                 "Read aloud settings" -> startActivity(Intent(this, TtsSettingsActivity::class.java))
+                "Settings" -> startActivity(Intent(this, AppSettingsActivity::class.java))
             }
         }
     }
@@ -533,6 +601,19 @@ class MainActivity : Activity() {
         syncRowParams.bottomMargin = dp(2)
         root.addView(syncRow, syncRowParams)
 
+        // Asked for explicitly 2026-09-11: a small total-conversation-count
+        // line, same muted/11sp styling as the sync label above it. Counts
+        // allConversations (unfiltered) rather than whatever the search box
+        // currently shows -- "total" means total, not "how many matched".
+        val totalLabel = TextView(this)
+        totalLabel.textSize = 11f
+        totalLabel.setTextColor(Theme.muted)
+        val totalLabelParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        totalLabelParams.leftMargin = dp(12)
+        totalLabelParams.bottomMargin = dp(4)
+        root.addView(totalLabel, totalLabelParams)
+        totalCountLabel = totalLabel
+
         val header = tableHeaderRow()
         header.setOnLongClickListener { confirmRepair(); true }
         root.addView(header)
@@ -566,6 +647,27 @@ class MainActivity : Activity() {
 
         installPullToRefresh(listView, indicator)
         root.addView(pullContainer, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
+
+        mainReadAloud = ReadAloudController(
+            context = this,
+            onStateChanged = { active -> if (active) mainPlayerBar.show() else mainPlayerBar.hide() },
+            onPlayingChanged = { playing -> mainPlayerBar.setPlaying(playing) },
+        )
+        mainPlayerBar = PlayerControlBar(
+            context = this,
+            onPreviousSection = { mainReadAloud.skipToPreviousSection() },
+            onRewind = { mainReadAloud.seekRelative(-15_000) },
+            onPlayPause = {
+                if (mainPlayerBar.isPlayingIcon()) mainReadAloud.pause() else mainReadAloud.resume()
+            },
+            onForward = { mainReadAloud.seekRelative(15_000) },
+            onNextSection = { mainReadAloud.skipToNextSection() },
+            onSpeedClick = { anchor ->
+                SpeedPicker.show(this, anchor, mainReadAloud.getSpeed()) { speed -> mainReadAloud.setSpeed(speed) }
+            },
+        )
+        root.addView(mainPlayerBar.view)
+        mainReadAloud.bind()
 
         refreshList()
     }
@@ -672,6 +774,7 @@ class MainActivity : Activity() {
     private fun refreshList() {
         adapter ?: return
         allConversations = db.listConversations().filter { it.isLive }
+        totalCountLabel?.text = "${allConversations.size} conversation${if (allConversations.size == 1) "" else "s"}"
         applyFilter()
         val ok = getSharedPreferences("claudeagents_prefs", Context.MODE_PRIVATE)
             .getBoolean("last_sync_ok", true)
@@ -694,52 +797,6 @@ class MainActivity : Activity() {
 
     private fun applyFilter() {
         adapter?.items = QueryDsl.apply(allConversations, searchQuery)
-    }
-
-    // Three-column suggestion row (label / greyed alias / greyed
-    // description), the "Suggestion row anatomy" from query-dsl.md.
-    private class SuggestionRowAdapter(private val context: Context, private val data: List<QueryDsl.Suggestion>) : BaseAdapter() {
-        override fun getCount() = data.size
-        override fun getItem(position: Int) = data[position]
-        override fun getItemId(position: Int) = position.toLong()
-        override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
-            val dp = { v: Int -> Theme.dp(context, v) }
-            val row: LinearLayout
-            val label: TextView
-            val meta: TextView
-            if (convertView == null) {
-                row = LinearLayout(context)
-                row.orientation = LinearLayout.HORIZONTAL
-                row.setBackgroundColor(Theme.surface)
-                val padH = dp(14)
-                val padV = dp(10)
-                row.setPadding(padH, padV, padH, padV)
-                label = TextView(context)
-                label.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL)
-                label.textSize = 14f
-                label.setTextColor(Theme.onBackground)
-                row.addView(label, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
-                meta = TextView(context)
-                meta.textSize = 12f
-                meta.setTextColor(Theme.muted)
-                meta.maxLines = 1
-                meta.ellipsize = TextUtils.TruncateAt.END
-                val metaParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
-                metaParams.marginStart = dp(10)
-                row.addView(meta, metaParams)
-                row.tag = arrayOf(label, meta)
-            } else {
-                row = convertView as LinearLayout
-                @Suppress("UNCHECKED_CAST")
-                val tag = row.tag as Array<TextView>
-                label = tag[0]
-                meta = tag[1]
-            }
-            val s = data[position]
-            label.text = s.label
-            meta.text = listOfNotNull(s.alias, s.description.ifEmpty { null }).joinToString("  ")
-            return row
-        }
     }
 
     private fun updateSearchPopup(anchor: EditText) {

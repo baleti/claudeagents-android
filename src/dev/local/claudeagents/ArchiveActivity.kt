@@ -47,6 +47,7 @@ class ArchiveActivity : Activity() {
     private var searchQuery: String = ""
     private var syncSpinner: View? = null
     private var syncLabel: TextView? = null
+    private var totalCountLabel: TextView? = null
     private var syncingNow = false
 
     private val syncReceiver = object : BroadcastReceiver() {
@@ -199,6 +200,19 @@ class ArchiveActivity : Activity() {
         syncRowParams.bottomMargin = dp(2)
         root.addView(syncRow, syncRowParams)
 
+        // Same small total-count line as MainActivity's conversation list
+        // (asked for explicitly 2026-09-11) -- counts allConversations
+        // (unfiltered), i.e. all archived conversations, not the current
+        // search results.
+        val totalLabel = TextView(this)
+        totalLabel.textSize = 11f
+        totalLabel.setTextColor(Theme.muted)
+        val totalLabelParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        totalLabelParams.leftMargin = dp(12)
+        totalLabelParams.bottomMargin = dp(4)
+        root.addView(totalLabel, totalLabelParams)
+        totalCountLabel = totalLabel
+
         val listView = ListView(this)
         listView.divider = null
         listView.dividerHeight = 0
@@ -295,6 +309,7 @@ class ArchiveActivity : Activity() {
     private fun refreshList() {
         adapter ?: return
         allConversations = db.listConversations().filter { !it.isLive }
+        totalCountLabel?.text = "${allConversations.size} conversation${if (allConversations.size == 1) "" else "s"}"
         applyFilter()
     }
 

@@ -1,5 +1,64 @@
 package dev.local.claudeagents
 
+import android.content.Context
+import android.graphics.Typeface
+import android.text.TextUtils
+import android.view.View
+import android.view.ViewGroup
+import android.widget.BaseAdapter
+import android.widget.LinearLayout
+import android.widget.TextView
+
+/**
+ * Three-column suggestion row (label / greyed alias / greyed
+ * description), the "Suggestion row anatomy" from query-dsl.md. Shared
+ * by MainActivity's and ChatActivity's drawer search boxes (both use the
+ * same QueryDsl.suggestions() shape) rather than copy-pasted twice.
+ */
+class SuggestionRowAdapter(private val context: Context, private val data: List<QueryDsl.Suggestion>) : BaseAdapter() {
+    override fun getCount() = data.size
+    override fun getItem(position: Int) = data[position]
+    override fun getItemId(position: Int) = position.toLong()
+    override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+        val dp = { v: Int -> Theme.dp(context, v) }
+        val row: LinearLayout
+        val label: TextView
+        val meta: TextView
+        if (convertView == null) {
+            row = LinearLayout(context)
+            row.orientation = LinearLayout.HORIZONTAL
+            row.setBackgroundColor(Theme.surface)
+            val padH = dp(14)
+            val padV = dp(10)
+            row.setPadding(padH, padV, padH, padV)
+            label = TextView(context)
+            label.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL)
+            label.textSize = 14f
+            label.setTextColor(Theme.onBackground)
+            row.addView(label, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+            meta = TextView(context)
+            meta.textSize = 12f
+            meta.setTextColor(Theme.muted)
+            meta.maxLines = 1
+            meta.ellipsize = TextUtils.TruncateAt.END
+            val metaParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+            metaParams.marginStart = dp(10)
+            row.addView(meta, metaParams)
+            row.tag = arrayOf(label, meta)
+        } else {
+            row = convertView as LinearLayout
+            @Suppress("UNCHECKED_CAST")
+            val tag = row.tag as Array<TextView>
+            label = tag[0]
+            meta = tag[1]
+        }
+        val s = data[position]
+        label.text = s.label
+        meta.text = listOfNotNull(s.alias, s.description.ifEmpty { null }).joinToString("  ")
+        return row
+    }
+}
+
 /**
  * The shared picker query DSL (~/.config/docs/query-dsl.md), applied to the
  * conversation list's search box. This table has no dynamic columns (fixed
@@ -112,7 +171,9 @@ object QueryDsl {
         val secondSlash = rest.indexOf('/')
         val verbPart = if (secondSlash >= 0) rest.substring(0, secondSlash) else rest
         val via = if (secondSlash >= 0) rest.substring(secondSlash + 1) else null
-        val verb = VERB_ALIASES[verbPart] ?: return null
+        // "//path": the empty verb slot before the via "/" defaults to /fv
+        // (query-dsl.md "Default verb")
+        val verb = (if (secondSlash >= 0 && verbPart.isEmpty()) "fv" else VERB_ALIASES[verbPart]) ?: return null
         return verb to via
     }
 
@@ -299,7 +360,7 @@ object QueryDsl {
         val slash = rest.indexOf('/')
         if (slash < 0) return null
         val verbPart = rest.substring(0, slash)
-        if (verbPart != "fv" && verbPart != "filter-value") return null
+        if (verbPart != "fv" && verbPart != "filter-value" && verbPart.isNotEmpty()) return null
         val fields = resolveFields(rest.substring(slash + 1))
         return fields.ifEmpty { null }
     }
@@ -363,7 +424,7 @@ object QueryDsl {
             val slash = t.raw.indexOf('/', 1)
             if (slash < 0) return@run
             val verbPart = t.raw.substring(1, slash)
-            if (verbPart !in setOf("fv", "filter-value", "s", "sort")) return@run
+            if (verbPart !in setOf("", "fv", "filter-value", "s", "sort")) return@run
             val afterVerb = t.raw.substring(slash + 1)
             val lastSeg = afterVerb.substringAfterLast('/')
             val headLen = t.raw.length - lastSeg.length

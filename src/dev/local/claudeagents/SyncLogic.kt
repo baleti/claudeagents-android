@@ -96,6 +96,8 @@ object SyncLogic {
                     Log.w(TAG, "sync: skipping ${c.id} this round: ${e.message}")
                 }
             }
+            val pruned = db.pruneOrphanedMessages()
+            if (pruned > 0) Log.i(TAG, "sync: reclaimed $pruned orphaned message rows (see deleteConversation's 2026-09-20 fix)")
             Log.i(TAG, "sync: done, local now has ${db.listConversations().size} conversations")
             true
         } catch (e: Exception) {
