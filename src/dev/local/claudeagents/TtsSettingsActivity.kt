@@ -169,41 +169,6 @@ class TtsSettingsActivity : Activity() {
             refreshVoices(engine)
         }
 
-        root.addView(spacer(24))
-        root.addView(sectionLabel("Speech to text (testing)"))
-        root.addView(
-            TextView(this).apply {
-                text = "Which model transcribes your voice into the message box. Three options here purely to compare them while this feature is new."
-                textSize = 12f
-                setTextColor(Theme.onSurfaceVariant)
-                setPadding(0, Theme.dp(this@TtsSettingsActivity, 4), 0, Theme.dp(this@TtsSettingsActivity, 6))
-            },
-        )
-        val sttGroup = RadioGroup(this).apply { orientation = RadioGroup.VERTICAL }
-        // Must match server.py's STT_ENGINES keys exactly.
-        val sttOptions = listOf(
-            "whisper-small-cpu" to "Small (CPU) - fastest, least accurate",
-            "whisper-medium-cpu" to "Medium (CPU) - balanced, default",
-            "whisper-large-v3-cpu" to "Large v3 (CPU) - most accurate, slower",
-        )
-        val sttRadios = sttOptions.mapIndexed { i, (key, label) ->
-            RadioButton(this).apply {
-                text = label
-                id = 100 + i
-                setTextColor(Theme.onBackground)
-                buttonTintList = ColorStateList.valueOf(Theme.primary)
-                tag = key
-            }
-        }
-        sttRadios.forEach { sttGroup.addView(it) }
-        root.addView(sttGroup)
-        val savedSttModel = TtsSettings.getSttModel(this)
-        sttRadios.firstOrNull { it.tag == savedSttModel }?.isChecked = true
-        sttGroup.setOnCheckedChangeListener { _, checkedId ->
-            val picked = sttRadios.firstOrNull { it.id == checkedId }?.tag as? String ?: return@setOnCheckedChangeListener
-            TtsSettings.setSttModel(this, picked)
-        }
-
         root.addView(spacer(20))
         setContentView(ScrollView(this).apply { setBackgroundColor(Theme.bg); addView(root) })
         checkEngineStatus(portField, engineStatus)
@@ -222,10 +187,7 @@ class TtsSettingsActivity : Activity() {
                 conn.setRequestProperty("X-Peer-Agent", "1")
                 val body = conn.inputStream.bufferedReader().use { it.readText() }
                 val obj = org.json.JSONObject(body)
-                val text = "kokoro: ${obj.optString("kokoro", "?")} · chatterbox: ${obj.optString("chatterbox", "?")}\n" +
-                    "whisper-small-cpu: ${obj.optString("whisper-small-cpu", "?")} · " +
-                    "whisper-medium-cpu: ${obj.optString("whisper-medium-cpu", "?")} · " +
-                    "whisper-large-v3-cpu: ${obj.optString("whisper-large-v3-cpu", "?")}"
+                val text = "kokoro: ${obj.optString("kokoro", "?")} · chatterbox: ${obj.optString("chatterbox", "?")}"
                 runOnUiThread { statusView.text = text }
             } catch (e: Exception) {
                 runOnUiThread { statusView.text = "TTS server unreachable — check port" }

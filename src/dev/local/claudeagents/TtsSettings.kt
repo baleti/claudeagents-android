@@ -39,15 +39,4 @@ object TtsSettings {
     fun setTtsVoice(context: Context, voice: String?) {
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString("tts_voice", voice).apply()
     }
-
-    // Which speech-to-text model /stt/transcribe should use -- see
-    // server.py's STT_ENGINES. Exposed as a settings choice purely for
-    // testing/comparing the three while this feature is new (asked for
-    // explicitly 2026-09-12); "whisper-medium-cpu" is the balanced default.
-    fun getSttModel(context: Context): String =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("stt_model", "whisper-medium-cpu") ?: "whisper-medium-cpu"
-
-    fun setSttModel(context: Context, model: String) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString("stt_model", model).apply()
-    }
 }
