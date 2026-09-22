@@ -74,10 +74,54 @@ class ReadAloudController(
     private var ws: WebSocketClient? = null
     @Volatile private var active = false
     @Volatile private var currentSpeed = 1.0f
-    // Bumped every start()/skipToNextSection(). A stale message from an
-    // abandoned stream can't touch shared state after a new one started
-    // (same guard newsdigest's controller uses).
+    // Bumped only on a genuine abandon-everything event - start()/stop()/
+    // skipToNextSection()/skipToPreviousSection() - NOT on ordinary
+    // section-to-section chaining (that's now a live/ahead promotion, see
+    // SectionSession below, and both a section's own connection and its
+    // prefetched successor share the same epoch throughout normal
+    // playback). A stale message from an abandoned stream can't touch
+    // shared state after a new one started (same guard newsdigest's
+    // controller uses).
     @Volatile private var streamGeneration = 0
+
+    private class PendingAudio(val text: String, val words: List<WordTiming>, val pcm: ByteArray, val sampleRate: Int)
+
+    // One /tts/stream connection for one section. `live`: arrivals go
+    // straight to TtsPlaybackService.enqueueSentence(); false means this is
+    // a prefetch running ahead of its turn, so arrivals are buffered
+    // instead - flipped to true (and the buffer flushed, in order) the
+    // moment this section is actually promoted to live. Lets a section's
+    // synthesis get a real head start while the PREVIOUS section is still
+    // playing, without breaking playback order.
+    private class SectionSession(val index: Int, val epoch: Int) {
+        @Volatile var live = false
+        val buffer = mutableListOf<PendingAudio>()
+        @Volatile var done = false
+        var ws: WebSocketClient? = null
+    }
+
+    // The section currently playing, and (if one has been started) the
+    // next section's connection running ahead of it. Confirmed live
+    // 2026-09-22: without this, Claude Agents' bubble-by-bubble chaining
+    // (unlike newsdigest-android's single continuous-article stream) paid
+    // a full cold "new connection + first sentence synth" gap at EVERY
+    // message boundary, no matter how deep the server's own pipelining
+    // buffered within one connection - server-side buffering only helps
+    // WITHIN a stream, and this app opens a new one per chat bubble.
+    private var liveSession: SectionSession? = null
+    private var aheadSession: SectionSession? = null
+    // The TtsPlaybackService's OWN session generation at the moment THIS
+    // controller's start() called startSession() -- captured once, not
+    // re-captured per section, since it stays valid for the whole life of
+    // this read (chained sections, skipToNext/PreviousSection,
+    // appendSections() in live mode all reuse the same underlying
+    // service session). See TtsPlaybackService.currentSessionGeneration()'s
+    // own doc for why this exists: streamGeneration alone only detects a
+    // newer stream from THIS SAME controller instance, not a completely
+    // different controller (a different ChatActivity, still alive in the
+    // background after being left mid-read) taking over the shared
+    // service out from under it.
+    @Volatile private var myServiceSessionGeneration = -1
 
     private var sections: List<String> = emptyList()
     @Volatile private var currentSectionIndex = 0
@@ -180,7 +224,7 @@ class ReadAloudController(
         override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
             val svc = (service as TtsPlaybackService.LocalBinder).service()
             ttsService = svc
-            svc.setListener(playbackListener)
+            svc.addListener(playbackListener)
             bound = true
             // A previous ChatActivity instance may have started a session
             // and then gone away (back button, app switch) without
@@ -221,12 +265,25 @@ class ReadAloudController(
      * end the read (this controller never does that on its own). */
     fun unbind() {
         if (bound) {
+            // Unregister first -- listeners is now a set every bound
+            // controller shares (see TtsPlaybackService's own doc), so
+            // leaving this in would keep a destroyed Activity's controller
+            // (and everything it closes over) reachable from the service
+            // indefinitely, a real leak across repeated open/close cycles.
+            ttsService?.removeListener(playbackListener)
             try { context.unbindService(connection) } catch (_: Exception) {}
             bound = false
         }
     }
 
     fun isActive(): Boolean = active
+
+    /** Which conversation the CURRENT background session belongs to, if
+     * any -- see TtsPlaybackService.currentConversationId()'s own doc.
+     * Lets a controller bound from a different screen than the one that
+     * started playback (MainActivity, in particular) figure out where a
+     * "locate" tap should navigate. */
+    fun currentConversationId(): String? = ttsService?.currentConversationId()
 
     fun getSectionCount(): Int = sections.size
     fun getCurrentSectionIndex(): Int = currentSectionIndex
@@ -241,7 +298,7 @@ class ReadAloudController(
      * Claude still typing or a new one the user sends) rather than ending
      * the read the instant it catches up to "everything there was when I
      * pressed play". */
-    fun start(title: String, sections: List<String>, live: Boolean = false) {
+    fun start(title: String, sections: List<String>, live: Boolean = false, conversationId: String? = null) {
         stop()
         this.sections = sections
         this.liveMode = live
@@ -276,7 +333,8 @@ class ReadAloudController(
         // service both vanished the moment ChatActivity.onDestroy() ran
         // unbind(), even with the stop() call already removed from it.
         context.startForegroundService(Intent(context, TtsPlaybackService::class.java))
-        svc.startSession(title)
+        svc.startSession(title, conversationId)
+        myServiceSessionGeneration = svc.currentSessionGeneration()
         // See TtsPlaybackService.setEstimatedDuration's doc (kept in sync
         // with newsdigest-android's copy) - upfront guess from the whole
         // chained session's word count, not just the first section.
@@ -293,7 +351,7 @@ class ReadAloudController(
         val svc = ttsService ?: return
         if (!hasNextSection()) return
         currentSectionIndex += 1
-        ws?.close() // stop the old section's remaining sentences from arriving after the new one's
+        abandonSessions() // a skip invalidates the whole lookahead, not just the live connection
         svc.jumpToUpcoming()
         onGenerating(true, avgSynthMs)
         streamCurrentSection(svc)
@@ -306,7 +364,8 @@ class ReadAloudController(
      * nothing to add. Only actually kicks off a new stream if playback had
      * genuinely caught up and was waiting (stalledAtEnd) -- otherwise the
      * new section is just appended to the backlog and the section
-     * currently in flight will reach it naturally once it finishes. */
+     * currently in flight (or its already-running prefetch) will reach it
+     * naturally once it finishes. */
     fun appendSections(newSections: List<String>) {
         if (newSections.isEmpty() || !liveMode) return
         sections = sections + newSections
@@ -325,43 +384,91 @@ class ReadAloudController(
         val svc = ttsService ?: return
         if (currentSectionIndex <= 0) return
         currentSectionIndex -= 1
-        ws?.close()
+        abandonSessions()
         svc.jumpToUpcoming()
         onGenerating(true, avgSynthMs)
         streamCurrentSection(svc)
     }
 
-    /** Connects to /tts/stream for sections[currentSectionIndex], enqueues
-     * every sentence that comes back, and on "done" either chains straight
-     * into the next section (same session, no gap) or ends the session if
-     * this was the last one. */
+    /** Closes both the live connection and any in-flight prefetch, and
+     * bumps the epoch so anything still arriving on either is ignored from
+     * here on - used by every "abandon everything and jump elsewhere"
+     * entry point (skip forward/back, stop()). Ordinary section-to-section
+     * chaining does NOT call this - see SectionSession's own doc. */
+    private fun abandonSessions() {
+        streamGeneration++
+        liveSession?.ws?.close()
+        aheadSession?.ws?.close()
+        liveSession = null
+        aheadSession = null
+        ws = null
+    }
+
+    /** Makes the section at currentSectionIndex the live one - either by
+     * promoting an already-running prefetch (the common case once the
+     * pipeline is warm: no new connection, no cold-start gap) or, if
+     * nothing was prefetched yet (the very first section, or right after a
+     * skip), by opening a fresh connection. */
     private fun streamCurrentSection(svc: TtsPlaybackService) {
         val idx = currentSectionIndex
-        val text = sections.getOrNull(idx) ?: return
+        if (sections.getOrNull(idx) == null) return
+        val ahead = aheadSession
+        val session = if (ahead != null && ahead.index == idx && ahead.epoch == streamGeneration) {
+            aheadSession = null
+            ahead
+        } else {
+            val fresh = SectionSession(idx, streamGeneration)
+            openConnection(svc, fresh)
+            fresh
+        }
+        promote(svc, session)
+    }
+
+    /** Flips a section's connection from "prefetching, buffering" to
+     * "live, enqueueing for real" - flushing whatever already arrived (in
+     * order) and updating all the per-section bookkeeping (highlight
+     * state, position-reporting baseline, the caller-facing
+     * onSectionChanged callback). If the section had ALREADY fully
+     * arrived while it was still just a prefetch, its "done" is handled
+     * immediately rather than waiting for an event that already happened.
+     * Also kicks off prefetching the NEXT section, one deep - matching
+     * TTS_MAX_CONCURRENT_SYNTHESIS server-side (see server.py), and the
+     * same "one ahead" principle as the GPU pipelining that motivated it. */
+    private fun promote(svc: TtsPlaybackService, session: SectionSession) {
+        val idx = session.index
         searchCursor = 0
         currentSentenceStartOffset = 0
         currentWordRanges = emptyList()
         onSectionChanged.invoke(idx)
+        liveSession = session
+        ws = session.ws
 
-        val myGeneration = ++streamGeneration
-        fun isCurrent() = streamGeneration == myGeneration
-        // Base position this stream builds on top of - each section is
-        // its own fresh stream/connection, chained onto the same session,
-        // so "played_ms" reported below has to be relative to THIS
-        // section's own audio, matching how the server counts what it's
-        // sent for this connection.
-        val streamStartPositionMs = svc.getPositionMs()
+        val flushed: List<PendingAudio>
+        val alreadyDone: Boolean
+        synchronized(session) {
+            session.live = true
+            flushed = session.buffer.toList()
+            session.buffer.clear()
+            alreadyDone = session.done
+        }
+        for (p in flushed) svc.enqueueSentence(p.text, p.words, p.pcm, p.sampleRate)
 
         // Tells the server how far playback has actually gotten into this
         // section, every 500ms, so it can cap how far ahead of that it
         // synthesizes (see server.py's TTS_LOOKAHEAD_CAP_MS). A paused
         // player simply stops advancing getPositionMs(), which is exactly
         // what makes the server stall on its own - no separate pause
-        // signal needed. Reported live 2026-09-09 (in newsdigest-android's
-        // copy of this file): the server was synthesizing the entire
-        // article right after the first play.
-        fun reportPosition(client: WebSocketClient) {
-            if (!isCurrent()) return
+        // signal needed. Baseline is captured HERE, at promotion, not at
+        // connection-open time - a prefetching connection may have already
+        // been open for a while with no position feedback at all, which is
+        // fine/intended (see GpuSlotManager... no, TTS_LOOKAHEAD_CAP_MS's
+        // own doc server-side: with no position reports yet it just
+        // buffers eagerly, exactly the head start prefetching wants).
+        val streamStartPositionMs = svc.getPositionMs()
+        fun isCurrent() = session.epoch == streamGeneration && svc.currentSessionGeneration() == myServiceSessionGeneration
+        fun reportPosition() {
+            val client = session.ws ?: return
+            if (!isCurrent()) { client.close(); return }
             val playedMs = (svc.getPositionMs() - streamStartPositionMs).coerceAtLeast(0)
             try {
                 client.sendText(JSONObject().apply {
@@ -369,17 +476,80 @@ class ReadAloudController(
                     put("played_ms", playedMs)
                 }.toString())
             } catch (_: Exception) {}
-            mainHandler.postDelayed({ reportPosition(client) }, 500)
+            mainHandler.postDelayed(::reportPosition, 500)
         }
+        reportPosition()
+
+        if (alreadyDone) {
+            handleSectionDone(svc, session)
+        } else if (idx + 1 < sections.size) {
+            maybeStartPrefetch(svc, idx + 1)
+        }
+    }
+
+    /** A section's stream reported "done" while it was already live -
+     * chain into whatever's next: promote an already-running prefetch (no
+     * gap), fall back to opening a fresh connection if nothing was
+     * prefetched, wait for more in live mode, or end the session. */
+    private fun handleSectionDone(svc: TtsPlaybackService, session: SectionSession) {
+        val idx = session.index
+        if (idx + 1 < sections.size) {
+            currentSectionIndex = idx + 1
+            streamCurrentSection(svc)
+        } else if (liveMode) {
+            // Nothing more to read YET -- don't end the session, just
+            // wait. TtsPlaybackService's play loop idles without firing
+            // the real "stopped" callback as long as endSession() was
+            // never called, so playback UI stays in its normal "still
+            // working" gap state (same one a mid-section synthesis gap
+            // already shows) rather than flipping back to a stopped
+            // Read Aloud button.
+            stalledAtEnd = true
+        } else {
+            svc.endSession()
+        }
+    }
+
+    /** Opens a connection for section `idx` one section ahead of whatever
+     * is currently live, so its synthesis gets a real head start instead
+     * of only starting once the current section finishes. No-op if
+     * already prefetching this exact section. */
+    private fun maybeStartPrefetch(svc: TtsPlaybackService, idx: Int) {
+        if (idx !in sections.indices) return
+        if (aheadSession?.index == idx) return
+        val session = SectionSession(idx, streamGeneration)
+        aheadSession = session
+        openConnection(svc, session)
+    }
+
+    /** Connects to /tts/stream for sections[session.index]. Whether
+     * arrivals get enqueued for real playback or just buffered depends
+     * entirely on `session.live`, which this function never sets itself -
+     * promote() is what flips it, possibly well after this connection was
+     * opened (that's the whole point: a section's synthesis can start
+     * before it's actually its turn to play). */
+    private fun openConnection(svc: TtsPlaybackService, session: SectionSession) {
+        val idx = session.index
+        val text = sections.getOrNull(idx) ?: return
+        fun isCurrent() = session.epoch == streamGeneration && svc.currentSessionGeneration() == myServiceSessionGeneration
+
+        // Constructed (not connected) synchronously, on the caller's own
+        // thread - promote() reads session.ws right after calling this and
+        // needs it to already exist, not race a background thread that
+        // hasn't gotten around to creating it yet (confirmed while writing
+        // this: the original single-connection version never had this
+        // problem because reportPosition() only ever started from inside
+        // onOpen(), already on the connection's own thread).
+        val client = WebSocketClient(
+            TokenStore.getHost(context),
+            TtsSettings.getTtsPort(context),
+            "/tts/stream",
+            mapOf("X-Peer-Agent" to "1"),
+        )
+        session.ws = client
+        if (session.live) ws = client
 
         Thread {
-            val client = WebSocketClient(
-                TokenStore.getHost(context),
-                TtsSettings.getTtsPort(context),
-                "/tts/stream",
-                mapOf("X-Peer-Agent" to "1"),
-            )
-            ws = client
             client.connect(object : WebSocketClient.Listener {
                 private var pendingMeta: JSONObject? = null
 
@@ -389,32 +559,26 @@ class ReadAloudController(
                         put("engine", TtsSettings.getTtsEngine(context))
                         TtsSettings.getTtsVoice(context)?.let { put("voice", it) }
                     }.toString())
-                    mainHandler.post { reportPosition(client) }
                 }
 
                 override fun onText(msg: String) {
-                    if (!isCurrent()) return
+                    // A different controller (a different ChatActivity, left
+                    // mid-read instead of stopped -- see
+                    // TtsPlaybackService.currentSessionGeneration()'s own
+                    // doc) took over the shared service out from under this
+                    // one. Close the connection instead of just ignoring
+                    // its messages forever, so the server stops spending
+                    // GPU time synthesizing audio nothing will ever play.
+                    if (!isCurrent()) { client.close(); return }
                     val obj = JSONObject(msg)
                     when (obj.optString("type")) {
                         "sentence" -> pendingMeta = obj
                         "done" -> {
-                            if (idx + 1 < sections.size) {
-                                currentSectionIndex = idx + 1
-                                streamCurrentSection(svc)
-                            } else if (liveMode) {
-                                // Nothing more to read YET -- don't end the
-                                // session, just wait. TtsPlaybackService's
-                                // play loop idles without firing the real
-                                // "stopped" callback as long as endSession()
-                                // was never called, so playback UI stays in
-                                // its normal "still working" gap state
-                                // (same one a mid-section synthesis gap
-                                // already shows) rather than flipping back
-                                // to a stopped Read Aloud button.
-                                stalledAtEnd = true
-                            } else {
-                                svc.endSession()
+                            val wasLive = synchronized(session) {
+                                session.done = true
+                                session.live
                             }
+                            if (wasLive) mainHandler.post { if (isCurrent()) handleSectionDone(svc, session) }
                         }
                         "error" -> {
                             Log.e("ReadAloudController", "server error: ${obj.optString("message")}")
@@ -430,7 +594,7 @@ class ReadAloudController(
                 }
 
                 override fun onBinary(data: ByteArray) {
-                    if (!isCurrent()) return
+                    if (!isCurrent()) { client.close(); return }
                     val meta = pendingMeta ?: return
                     val words = mutableListOf<WordTiming>()
                     val wordsArray = meta.optJSONArray("words")
@@ -440,12 +604,16 @@ class ReadAloudController(
                             words.add(WordTiming(w.getString("word"), w.getInt("start_ms"), w.getInt("end_ms")))
                         }
                     }
-                    svc.enqueueSentence(meta.getString("text"), words, data, meta.getInt("sample_rate"))
                     recordSynthMs(meta.optLong("synth_ms", -1))
+                    val audio = PendingAudio(meta.getString("text"), words, data, meta.getInt("sample_rate"))
+                    val enqueueNow = synchronized(session) {
+                        if (session.live) true else { session.buffer.add(audio); false }
+                    }
+                    if (enqueueNow) svc.enqueueSentence(audio.text, audio.words, audio.pcm, audio.sampleRate)
                 }
 
                 override fun onFailure(error: Throwable) {
-                    if (!isCurrent()) return // expected: skipToNextSection()'s ws.close() surfaces as a failure on the abandoned stream
+                    if (!isCurrent()) return // expected: abandonSessions()'s close() surfaces as a failure on the abandoned connection
                     Log.e("ReadAloudController", "websocket failed", error)
                     mainHandler.post {
                         active = false
@@ -461,10 +629,18 @@ class ReadAloudController(
         liveMode = false
         stalledAtEnd = false
         onGenerating(false, 0L)
-        streamGeneration++
-        ws?.close()
-        ws = null
+        abandonSessions()
         ttsService?.stopAll()
+        // Explicit, synchronous notification - stopAll()'s own async
+        // onQueueIdle callback (posted to mainHandler) checks `if (active)`
+        // before firing onStateChanged(false), but `active` is already set
+        // false above by the time that runs, so it silently never fires.
+        // Confirmed live 2026-09-22: pressing the stop button never hid the
+        // player bar because of exactly this - stop() has to tell the
+        // caller itself, it can't rely on the service's own idle signal
+        // here (that signal is for playback running out on its own, not
+        // for a deliberate stop that already know the outcome).
+        onStateChanged.invoke(false)
     }
 
     fun pause() = ttsService?.pause()
@@ -474,6 +650,26 @@ class ReadAloudController(
         val svc = ttsService ?: return
         svc.seekTo((svc.getPositionMs() + deltaMs).coerceAtLeast(0))
     }
+
+    /** For a scrubber bar -- see PlayerControlBar's own doc. Unlike
+     * newsdigest-android's copy (one continuous article, so `fraction` maps
+     * to a character offset), this app's sections are discrete chat
+     * messages with no single linear text to map into -- position/duration
+     * here are already a continuous ms timeline across every section
+     * chained into the current session (TtsPlaybackService.allSentences
+     * accumulates across streamCurrentSection() calls, only resetting on a
+     * fresh startSession()), so `fraction` maps directly onto THAT instead,
+     * through the same seekTo() skipRelative()/skipToNextSection() already
+     * use. */
+    fun seekToFraction(fraction: Float) {
+        val svc = ttsService ?: return
+        val dur = svc.getDisplayDurationMs()
+        if (dur <= 0) return
+        svc.seekTo((fraction.coerceIn(0f, 1f) * dur).toLong())
+    }
+
+    fun getPositionMs(): Long = ttsService?.getPositionMs() ?: 0L
+    fun getDurationMs(): Long = ttsService?.getDisplayDurationMs() ?: 0L
 
     fun setSpeed(speed: Float) {
         currentSpeed = speed

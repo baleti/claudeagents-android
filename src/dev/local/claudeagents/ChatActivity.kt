@@ -4,6 +4,7 @@ import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.BroadcastReceiver
 import android.content.ContentValues
 import android.content.Context
@@ -24,6 +25,7 @@ import android.view.MotionEvent
 import android.view.ViewConfiguration
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
+import android.view.inputmethod.InputMethodManager
 import android.widget.AdapterView
 import android.widget.BaseAdapter
 import android.widget.Button
@@ -186,6 +188,26 @@ class ChatActivity : Activity() {
         // "Copied" toast a message bubble's own long-press/menu copy uses.
         title.setOnLongClickListener { copyMessage(title.text.toString()); true }
         titleRow.addView(title, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        // Same hand-built "⋮" idiom MainActivity's own overflow button
+        // uses (no ActionBar anywhere in this app) -- asked for explicitly
+        // 2026-09-21: a "Restart session" action that Ctrl-C's the live
+        // pane and relaunches `claude --resume ... --dangerously-skip-permissions`
+        // in that same pane, for kicking a stuck/hung session without
+        // losing the tmux window it's running in.
+        val overflowButton = TextView(this)
+        overflowButton.text = "⋮"
+        overflowButton.textSize = 20f
+        overflowButton.gravity = Gravity.CENTER
+        overflowButton.setTextColor(Theme.onBackground)
+        overflowButton.setPadding(dp(14), dp(10), dp(14), dp(10))
+        overflowButton.minWidth = dp(44)
+        overflowButton.minHeight = dp(44)
+        overflowButton.background = Theme.rippleOn(Theme.roundedDrawable(Color.TRANSPARENT, this, radiusDp = 20))
+        overflowButton.setOnClickListener { showChatOverflowMenu(overflowButton) }
+        val overflowParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        overflowParams.gravity = Gravity.CENTER_VERTICAL
+        overflowParams.marginStart = dp(4)
+        titleRow.addView(overflowButton, overflowParams)
         titleBar.addView(titleRow)
         val divider = View(this)
         divider.setBackgroundColor(Theme.outlineVariant)
@@ -311,6 +333,7 @@ class ChatActivity : Activity() {
             onSpeedClick = { anchor ->
                 SpeedPicker.show(this, anchor, readAloud.getSpeed()) { speed -> readAloud.setSpeed(speed) }
             },
+            onStop = { readAloud.stop() },
             // Re-scrolls to whichever message is currently being read --
             // asked for explicitly 2026-09-10. onSectionChanged above
             // already does this automatically as reading progresses, but
@@ -321,6 +344,9 @@ class ChatActivity : Activity() {
                 val pos = adapter.items.indexOfFirst { it.id == rowId }
                 if (pos >= 0) listView.smoothScrollToPosition(pos)
             },
+            getPosition = { readAloud.getPositionMs() },
+            getDuration = { readAloud.getDurationMs() },
+            onSeek = { fraction -> readAloud.seekToFraction(fraction) },
         )
         root.addView(playerBar.view)
         readAloud.bind()
@@ -389,6 +415,22 @@ class ChatActivity : Activity() {
             if (sendText(text)) {
                 input.setText("")
                 DraftStore.set(this, sessionId, "")
+                // Always jump to the just-sent message and dismiss the
+                // keyboard -- asked for explicitly 2026-09-20, specifically
+                // for dictation's auto-send: DictateAccessibilityService.
+                // maybeAutoSend() fires this SAME click listener via a real
+                // ACTION_CLICK on this button, and by then the keyboard may
+                // have come back up (the field regained focus for the
+                // ACTION_SET_TEXT insert) with the view possibly still
+                // scrolled up from before recording started. loadCached()'s
+                // own scroll (already run inside sendText() above) only
+                // follows the bottom if you were ALREADY there -- correct
+                // for a background poll/reply arriving while you're
+                // scrolled up rereading, but wrong here: YOUR OWN outgoing
+                // send should always jump into view regardless.
+                val imm = getSystemService(InputMethodManager::class.java)
+                imm?.hideSoftInputFromWindow(input.windowToken, 0)
+                listView.post { listView.setSelection(adapter.count - 1) }
             }
         }
         actionColumn.addView(send, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
@@ -891,6 +933,41 @@ class ChatActivity : Activity() {
         return true
     }
 
+    private fun showChatOverflowMenu(anchor: View) {
+        Theme.showMenu(this, anchor, listOf("Restart session")) { picked ->
+            when (picked) {
+                "Restart session" -> confirmRestartSession()
+            }
+        }
+    }
+
+    // Interrupts the live tmux pane (Ctrl-C) and relaunches `claude
+    // --resume <sessionId> --dangerously-skip-permissions` in that SAME
+    // pane -- asked for explicitly 2026-09-21, for kicking a stuck/hung
+    // session without losing the pane/window it's running in. Confirmed
+    // first: this throws away whatever the session was mid-doing, same
+    // as physically pressing Ctrl-C at the keyboard would.
+    private fun confirmRestartSession() {
+        AlertDialog.Builder(this)
+            .setTitle("Restart this session?")
+            .setMessage("Interrupts whatever Claude is currently doing (Ctrl-C) and relaunches it with --resume in the same window.")
+            .setPositiveButton("Restart") { _, _ -> restartSession() }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun restartSession() {
+        Toast.makeText(this, "Restarting session…", Toast.LENGTH_SHORT).show()
+        Thread {
+            try {
+                RelayClient(this).restart(sessionId)
+                runOnUiThread { Toast.makeText(this, "Session restarted", Toast.LENGTH_SHORT).show() }
+            } catch (e: Exception) {
+                runOnUiThread { Toast.makeText(this, "Restart failed: ${e.message}", Toast.LENGTH_LONG).show() }
+            }
+        }.apply { isDaemon = true; name = "RestartSession"; start() }
+    }
+
     private fun updateContextBanner(pct: Int?) {
         if (pct != null && pct >= CONTEXT_WARN_PCT) {
             contextBannerLabel?.text = "Context $pct% full — replies may start failing"
@@ -1177,8 +1254,20 @@ class ChatActivity : Activity() {
         // up to whatever existed when play was pressed. See
         // extendReadAloudIfActive(), called from loadCached() whenever a
         // poll brings in new rows.
-        readAloud.start(intent.getStringExtra("title") ?: sessionId, rows.map { it.text }, live = true)
+        readAloud.start(intent.getStringExtra("title") ?: sessionId, rows.map(::ttsTextFor), live = true, conversationId = sessionId)
     }
+
+    // The rendered, markdown-stripped plain text for a row, when its
+    // markdown renders as one safe plain-text segment -- same text
+    // MessageAdapter.highlightableText() uses for on-screen highlighting,
+    // so the server's word-timing offsets always line up with what's
+    // shown (see Markdown.singleSegmentPlainText's own doc for why this
+    // used to be broken: sending raw markdown here while displaying a
+    // SEPARATELY-rendered version meant the two almost never agreed).
+    // Falls back to the raw source for anything more complex (a table) --
+    // still gets read aloud, just without a highlight.
+    private fun ttsTextFor(row: ChatDisplayRow): String =
+        Markdown.singleSegmentPlainText(row.text, dimColor = Theme.muted) ?: row.text
 
     /** Feeds any newly-synced messages after the last one Read Aloud
      * already knows about into the running session, if one is active --
@@ -1206,7 +1295,7 @@ class ChatActivity : Activity() {
             }
         if (newRows.isEmpty()) return
         readAloudSectionRowIds = readAloudSectionRowIds + newRows.map { it.id!! }
-        readAloud.appendSections(newRows.map { it.text })
+        readAloud.appendSections(newRows.map(::ttsTextFor))
     }
 
     private var everLoaded = false

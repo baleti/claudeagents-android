@@ -656,15 +656,37 @@ class MainActivity : Activity() {
         mainPlayerBar = PlayerControlBar(
             context = this,
             onPreviousSection = { mainReadAloud.skipToPreviousSection() },
-            onRewind = { mainReadAloud.seekRelative(-15_000) },
+            // 10s, not 15 -- same fix as ChatActivity's own copy
+            // (2026-09-20), just never carried over to this screen's
+            // separate player bar instance.
+            onRewind = { mainReadAloud.seekRelative(-10_000) },
             onPlayPause = {
                 if (mainPlayerBar.isPlayingIcon()) mainReadAloud.pause() else mainReadAloud.resume()
             },
-            onForward = { mainReadAloud.seekRelative(15_000) },
+            onForward = { mainReadAloud.seekRelative(10_000) },
             onNextSection = { mainReadAloud.skipToNextSection() },
             onSpeedClick = { anchor ->
                 SpeedPicker.show(this, anchor, mainReadAloud.getSpeed()) { speed -> mainReadAloud.setSpeed(speed) }
             },
+            onStop = { mainReadAloud.stop() },
+            // Never wired at all before -- this screen has no message list
+            // of its own to scroll within (mainReadAloud's own doc), so
+            // "locate" here means "open the conversation that's actually
+            // playing" instead. currentConversationId() reflects whatever
+            // conversation's ChatActivity started the live session, since
+            // this controller only ever binds to an already-running one
+            // (see ReadAloudController.currentConversationId()'s own doc).
+            onLocate = {
+                val id = mainReadAloud.currentConversationId() ?: return@PlayerControlBar
+                val title = a.items.firstOrNull { it.id == id }?.title ?: id
+                val intent = Intent(this, ChatActivity::class.java)
+                intent.putExtra("session_id", id)
+                intent.putExtra("title", title)
+                startActivity(intent)
+            },
+            getPosition = { mainReadAloud.getPositionMs() },
+            getDuration = { mainReadAloud.getDurationMs() },
+            onSeek = { fraction -> mainReadAloud.seekToFraction(fraction) },
         )
         root.addView(mainPlayerBar.view)
         mainReadAloud.bind()

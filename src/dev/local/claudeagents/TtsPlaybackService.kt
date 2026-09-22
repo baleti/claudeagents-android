@@ -92,7 +92,18 @@ class TtsPlaybackService : Service() {
     }
 
     private val binder = LocalBinder()
-    @Volatile private var listener: HighlightListener? = null
+    // A set, not a single overwritable slot -- confirmed live 2026-09-21
+    // ("media player in claude agents suddenly stopped showing up in the
+    // main view list, only in conversations"). MainActivity's own
+    // ReadAloudController (mainReadAloud, see its own doc) and any
+    // ChatActivity's both bind to this SAME shared service and both call
+    // addListener() -- with a single `var listener` (the original design,
+    // back when only one controller ever bound at a time), whichever
+    // bound MOST RECENTLY silently stole the slot from the other, so
+    // opening a ChatActivity permanently cut MainActivity's controller
+    // off from any further onPlayingChanged/onQueueIdle updates, freezing
+    // its player bar's visibility at whatever it last happened to be.
+    private val listeners = java.util.concurrent.CopyOnWriteArraySet<HighlightListener>()
 
     // All sentences for the current session, in order - retained (never
     // drained) so seeking can jump to any point already synthesized.
@@ -140,6 +151,12 @@ class TtsPlaybackService : Service() {
     private var mediaSession: MediaSession? = null
     private val mainHandler = Handler(Looper.getMainLooper())
     private var currentTitle: String = "Claude Agents"
+    // Which conversation started the current session, if any -- lets a
+    // controller bound from a DIFFERENT screen than the one that started
+    // playback (MainActivity's own, see its own doc) figure out which
+    // chat to open for a "locate" tap, since this service otherwise has
+    // no notion of "conversation" at all, just a display title.
+    private var currentConversationId: String? = null
     @Volatile private var lastSentenceText: String = "Preparing..."
     // See setEstimatedDuration's doc - kept in sync with
     // newsdigest-android's copy of this file.
@@ -152,7 +169,7 @@ class TtsPlaybackService : Service() {
     private fun setPlaying(v: Boolean) {
         val changed = playing != v
         playing = v
-        if (changed) mainHandler.post { listener?.onPlayingChanged(v) }
+        if (changed) mainHandler.post { listeners.forEach { it.onPlayingChanged(v) } }
     }
 
     // Lets pause()/resume()/seekTo() report a sensible interpolated
@@ -260,15 +277,20 @@ class TtsPlaybackService : Service() {
         return START_NOT_STICKY
     }
 
-    fun setListener(l: HighlightListener?) {
-        listener = l
+    fun addListener(l: HighlightListener) {
+        listeners.add(l)
     }
 
-    fun startSession(title: String) {
+    fun removeListener(l: HighlightListener) {
+        listeners.remove(l)
+    }
+
+    fun startSession(title: String, conversationId: String? = null) {
         sessionGeneration++ // invalidate any onQueueIdle already queued from a stop before this
         hasActiveSession = true
         requestAudioFocus()
         currentTitle = title
+        currentConversationId = conversationId
         stopRequested = false
         idleSignaled = false
         sessionEnded = false
@@ -379,6 +401,24 @@ class TtsPlaybackService : Service() {
      * in its own UI at all. */
     fun hasActiveSession(): Boolean = hasActiveSession
 
+    /** Whichever conversation's readAloud.start() call is behind the
+     * current session, if that caller passed one -- see startSession()'s
+     * own doc. Null for a session started without one. */
+    fun currentConversationId(): String? = currentConversationId
+
+    /** Bumped by every startSession() -- lets a ReadAloudController that
+     * started an earlier session (and is still alive, still streaming, in
+     * the background -- see that class's own isCurrent() doc) recognize
+     * that a DIFFERENT controller instance has since taken over this same
+     * shared service and stop feeding it. Confirmed live 2026-09-20:
+     * leaving a conversation mid-read (back button, not "stop") only ever
+     * unbind()s its controller, not stop()s it -- its background
+     * websocket thread kept running and kept calling enqueueSentence()
+     * for the OLD conversation even after a different ChatActivity's OWN
+     * controller called startSession() for a NEW one, audibly mangling
+     * both conversations' audio together. */
+    fun currentSessionGeneration(): Int = sessionGeneration
+
     /** Real current playing/paused state, independent of which controller
      * (if any) is currently bound -- same use as hasActiveSession(). */
     fun isPlaying(): Boolean = playing
@@ -478,7 +518,7 @@ class TtsPlaybackService : Service() {
         // "started" flag.
         stopSelf()
         val myGen = sessionGeneration
-        mainHandler.post { if (sessionGeneration == myGen) listener?.onQueueIdle() }
+        mainHandler.post { if (sessionGeneration == myGen) listeners.forEach { it.onQueueIdle() } }
     }
 
     private fun ensurePlayThread() {
@@ -516,7 +556,7 @@ class TtsPlaybackService : Service() {
                     hasActiveSession = false
                     abandonAudioFocus() // reading finished on its own - hand focus back
                     val myGen = sessionGeneration
-                    mainHandler.post { if (sessionGeneration == myGen) listener?.onQueueIdle() }
+                    mainHandler.post { if (sessionGeneration == myGen) listeners.forEach { it.onQueueIdle() } }
                 }
                 Thread.sleep(100)
                 continue
@@ -534,13 +574,28 @@ class TtsPlaybackService : Service() {
             }
             val track = audioTrack ?: continue
 
-            setPlaying(true)
-            track.play()
+            // Only actually (re)start the track if we're not sitting
+            // paused - a sentence becoming available after a synthesis gap
+            // must NOT override a pause pressed during that gap. Confirmed
+            // live 2026-09-22: pressing pause while playback was naturally
+            // stalled waiting for the next sentence to synthesize got
+            // silently overridden back to playing the instant that
+            // sentence arrived, because this used to force
+            // setPlaying(true)/track.play() unconditionally here regardless
+            // of the user's actual pause state. The write loop below
+            // already correctly stalls on `!playing` once a sentence IS
+            // playing - this was the one place that didn't check it first.
             val sentenceStartMs = positionMsUpTo(index)
-            setPositionAnchor(sentenceStartMs + startOffsetMs, true)
-            updatePlaybackState(PlaybackState.STATE_PLAYING)
+            if (playing) {
+                track.play()
+                setPositionAnchor(sentenceStartMs + startOffsetMs, true)
+                updatePlaybackState(PlaybackState.STATE_PLAYING)
+            } else {
+                setPositionAnchor(sentenceStartMs + startOffsetMs, false)
+                updatePlaybackState(PlaybackState.STATE_PAUSED)
+            }
             mainHandler.post {
-                listener?.onSentenceStart(current.text, current.words, sentenceStartMs)
+                listeners.forEach { it.onSentenceStart(current.text, current.words, sentenceStartMs) }
                 updateNotification(current.text)
             }
 
@@ -578,7 +633,7 @@ class TtsPlaybackService : Service() {
                         ((System.nanoTime() - highlightAnchorAtNanos) / 1_000_000.0 * playbackSpeed).toLong()
                     while (idx < current.words.size && elapsedMs >= current.words[idx].endMs) idx++
                     if (idx < current.words.size) {
-                        listener?.onWordHighlight(idx)
+                        listeners.forEach { it.onWordHighlight(idx) }
                         mainHandler.postDelayed(this, HIGHLIGHT_TICK_MS)
                     }
                 }
@@ -601,7 +656,7 @@ class TtsPlaybackService : Service() {
                 if (written < 0) break
                 offset += written
             }
-            mainHandler.post { listener?.onSentenceEnd() }
+            mainHandler.post { listeners.forEach { it.onSentenceEnd() } }
 
             // Only advance naturally if nothing seeked elsewhere meanwhile
             // - a seek already repointed playIndex/seekOffsetMs itself.
@@ -690,7 +745,7 @@ class TtsPlaybackService : Service() {
             actionPendingIntent(ACTION_STOP),
         ).build()
 
-        return Notification.Builder(this, CHANNEL_ID)
+        val builder = Notification.Builder(this, CHANNEL_ID)
             .setContentTitle(currentTitle)
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_media_play)
@@ -702,7 +757,21 @@ class TtsPlaybackService : Service() {
                     .setMediaSession(mediaSession?.sessionToken)
                     .setShowActionsInCompactView(0, 1),
             )
-            .build()
+        // Tapping the notification opens the conversation actually playing,
+        // not just the app generically -- asked for explicitly 2026-09-20
+        // ("when I press on playback... it should open corresponding
+        // application on corresponding article/chat"). Same conversationId
+        // MainActivity's own onLocate button now uses (see startSession()'s
+        // doc) -- null only for a session started without one.
+        currentConversationId?.let { id ->
+            val openIntent = Intent(this, ChatActivity::class.java)
+                .putExtra("session_id", id)
+                .putExtra("title", currentTitle)
+            builder.setContentIntent(
+                PendingIntent.getActivity(this, 0, openIntent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE),
+            )
+        }
+        return builder.build()
     }
 
     private fun actionPendingIntent(action: String): PendingIntent {
