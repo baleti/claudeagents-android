@@ -160,6 +160,9 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
             time.textSize = 9f
             time.setTextColor(Theme.muted)
             time.maxLines = 1
+            // END_OF(role)+ALIGN_PARENT_END makes this view span the gap, so the
+            // text itself must be end-aligned to land at the far right.
+            time.gravity = Gravity.END
 
             // Role label left, timestamp pinned top-right (smaller font);
             // RelativeLayout so the timestamp stays right-aligned even in a
