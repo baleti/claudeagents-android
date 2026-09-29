@@ -8,7 +8,9 @@ data class ConversationRow(
     val mtime: Double,
     val lineCount: Int,
     val tokens: Int?,
-    val livePane: String?
+    val livePane: String?,
+    // "busy" | "idle" | "waiting" | "frozen" | "stopped" | null (unknown)
+    val liveStatus: String? = null
 ) {
     val isLive: Boolean get() = livePane != null
 }
@@ -73,7 +75,9 @@ data class ChatDisplayRow(
     // See MessageRow.errorType -- carried through so MessageAdapter can
     // render this row as a warning bubble instead of a normal one, and
     // (for "context_limit") offer a one-tap Compact action.
-    val errorType: String? = null
+    val errorType: String? = null,
+    // Epoch millis of the message (0 = unknown), shown top-right of the bubble.
+    val tsMs: Long = 0L
 )
 
 data class OutboxRow(

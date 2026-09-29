@@ -27,6 +27,7 @@ import threading
 import time
 import urllib.parse
 import uuid as uuid_mod
+import zlib
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -271,6 +272,37 @@ def is_pid_alive(pid):
         return False
 
 
+def _proc_state(pid):
+    """Single-char /proc/<pid>/stat state ('T' = job-control stopped)."""
+    try:
+        raw = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:
+        return None
+    rest = raw[raw.rfind(")") + 2:].split()
+    return rest[0] if rest else None
+
+
+def _is_cgroup_frozen(pid):
+    """True if pid was suspended by tmux's freeze-process-cgroup-toggle.sh
+    (lives in a tmux-freeze-<pid> cgroup v2 dir with cgroup.freeze == 1).
+    Not visible in /proc/<pid>/stat (still 'S'), and a frozen process can't
+    update its own sessions/<pid>.json, so the file's self-reported status
+    would keep saying busy/idle. Same check as claude-usage-daemon.py."""
+    try:
+        line = Path(f"/proc/{pid}/cgroup").read_text().splitlines()[0]
+    except (OSError, IndexError):
+        return False
+    if not line.startswith("0::"):
+        return False
+    relpath = line[3:]
+    if Path(relpath).name != f"tmux-freeze-{pid}":
+        return False
+    try:
+        return Path(f"/sys/fs/cgroup{relpath}/cgroup.freeze").read_text().strip() == "1"
+    except OSError:
+        return False
+
+
 def scan_sessions_registry():
     """Primary, authoritative live-session source: each account's own
     ~/.claudeN/sessions/<pid>.json (Claude Code's own registry of its
@@ -311,7 +343,13 @@ def scan_sessions_registry():
             m = TMUX_PANE_ID_RE.search(tmux_field)
             if not m:
                 continue
-            _record_live(result, session_id, dir_key, m.group(1), "exact", status=data.get("status"))
+            if _is_cgroup_frozen(pid):
+                status = "frozen"
+            elif _proc_state(pid) == "T":
+                status = "stopped"
+            else:
+                status = data.get("status")
+            _record_live(result, session_id, dir_key, m.group(1), "exact", status=status)
     return result
 
 
@@ -494,7 +532,28 @@ def _pane_input_box_text(pane_target):
     return None
 
 
+FREEZE_TOGGLE_SCRIPT = os.path.expanduser("~/.config/tmux/scripts/freeze-process-cgroup-toggle.sh")
+
+
+def thaw_pane_if_frozen(pane_target):
+    """A cgroup-frozen claude never reads its pty, so text sent to it would
+    just sit there and the session looks stuck. The tmux freeze script sets
+    pane option @frozen=1 and its toggle flushes stale pty input before
+    thawing, so reuse it (only when frozen -- it is a toggle)."""
+    try:
+        out = subprocess.run(
+            ["tmux", "display-message", "-p", "-t", pane_target, "#{@frozen} #{pane_pid}"],
+            capture_output=True, text=True, timeout=5).stdout.split()
+        if len(out) == 2 and out[0] == "1":
+            subprocess.run(["sh", FREEZE_TOGGLE_SCRIPT, out[1], pane_target], check=True, timeout=10)
+            log(f"thawed frozen pane {pane_target} before delivering text")
+            time.sleep(0.3)
+    except Exception as e:
+        log(f"thaw_pane_if_frozen({pane_target}) failed: {e}")
+
+
 def send_to_pane(pane_target, text):
+    thaw_pane_if_frozen(pane_target)
     try:
         subprocess.run(["tmux", "send-keys", "-t", pane_target, "-l", "--", text],
                         check=True, timeout=5)
@@ -643,6 +702,93 @@ def prune_old_uploads():
 SPAWN_SESSION_PREFIX = "rss-agent"
 CLAUDE_BIN = str(HOME / ".local" / "bin" / "claude")
 
+# Shared with ~/bin/peer-agent.py, which has its own tmux-spawning actions -
+# one toggle for "does a freshly-spawned Claude Code session become a visible
+# Hyprland window or stay a headless tmux session" regardless of which of the
+# two daemons actually did the spawning. See that file's copy of these three
+# functions (and ~/.config/peer-agent/peer-agent.md §9) for the full rationale;
+# kept as a plain duplicate rather than a shared import - the two daemons
+# don't share a module path and this is ~60 lines, not worth the coupling.
+DISPLAY_CONFIG_FILE = HOME / ".config/peer-agent/spawn-display.json"
+
+
+def _load_display_config():
+    try:
+        cfg = json.loads(DISPLAY_CONFIG_FILE.read_text())
+    except (OSError, ValueError):
+        return {"mode": "background"}
+    return cfg if isinstance(cfg, dict) else {"mode": "background"}
+
+
+def _hyprctl_env():
+    """claude-agents.service is a systemd --user unit that starts before
+    Hyprland's exec-once `systemctl --user import-environment
+    HYPRLAND_INSTANCE_SIGNATURE` line runs, so it never inherits that var -
+    same failure class as claude-usage.service. Auto-discover it instead."""
+    env = dict(os.environ)
+    if not env.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        runtime_dir = env.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+        try:
+            sigs = [p.name for p in (Path(runtime_dir) / "hypr").iterdir() if p.is_dir()]
+        except OSError:
+            sigs = []
+        if len(sigs) == 1:
+            env["HYPRLAND_INSTANCE_SIGNATURE"] = sigs[0]
+    return env
+
+
+def _maybe_open_display_window(tmux_session):
+    """Best-effort: attach a Hyprland window to a just-created tmux session
+    instead of leaving it invisible in the background. Never raises and
+    never affects the caller's success/failure result - a host with no
+    Hyprland session simply has no spawn-display.json, stays in
+    "background" mode by default, and never reaches the subprocess call."""
+    display_cfg = _load_display_config()
+    if display_cfg.get("mode", "background") != "window":
+        return
+    monitor = display_cfg.get("monitor")
+    # "empty" (Hyprland's own selector) picks the globally-lowest workspace
+    # with zero windows, with NO regard to which monitor it's already bound
+    # to - confirmed live 2026-09-22: a second spawn right after a first
+    # landed on workspace "1" on eDP-1 (the laptop screen) instead of the
+    # configured monitor, because "1" already existed there and the monitor
+    # rule doesn't relocate an existing workspace. A never-before-used
+    # workspace id has no prior binding, so `monitor` always applies cleanly.
+    #
+    # A *named* (`name:...`) workspace with no explicit numeric id also
+    # satisfies that, but Hyprland then auto-assigns it a NEGATIVE internal
+    # id - the same sign convention it uses for real `special:` scratchpad
+    # workspaces - so the quickshell bar's own workspace indicator, which
+    # filters `ws.id > 0` specifically to hide scratchpads
+    # (~/.config/quickshell/bar/Workspaces.qml), silently hides these too.
+    # Confirmed live 2026-09-22. A plain positive numeric id avoids both
+    # problems: derived from a hash of the session name so it's effectively
+    # unique per spawn without needing to query existing workspaces first.
+    workspace_cfg = display_cfg.get("workspace")
+    if workspace_cfg:
+        workspace = workspace_cfg.format(session=tmux_session, title=tmux_session)
+    else:
+        workspace = str(20000 + zlib.crc32(tmux_session.encode()) % 70000)
+    template = display_cfg.get(
+        "terminal_cmd",
+        "alacritty --title '{title}' -e tmux attach-session -t '{session}'",
+    )
+    rule = f"workspace {workspace}" + (f";monitor {monitor}" if monitor else "")
+    exec_str = f"[{rule}] {template.format(session=tmux_session, title=tmux_session)}"
+    lua = 'hl.dispatch(hl.dsp.exec_cmd("%s"))' % (
+        exec_str.replace("\\", "\\\\").replace('"', '\\"'))
+    try:
+        subprocess.run(
+            ["hyprctl", "eval", lua],
+            env=_hyprctl_env(),
+            cwd=str(HOME),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=5,
+        )
+    except Exception as e:
+        log(f"WARN tmux session={tmux_session} could not open display window: {e}")
+
 
 def spawn_session(dir_key, initial_text):
     """Starts a brand-new tmux+claude session with a caller-known session id,
@@ -673,6 +819,8 @@ def spawn_session(dir_key, initial_text):
     except Exception as e:
         log(f"spawn: tmux new-session failed: {e}")
         return None, "failed to start session"
+
+    _maybe_open_display_window(tmux_session)
 
     # The TUI needs a moment to finish drawing before it can accept
     # keystrokes - same fixed-delay approach send_to_pane's callers already
@@ -787,6 +935,8 @@ def resume_session(session_id, initial_text):
         except Exception as e:
             log(f"resume: tmux new-session failed for {session_id}: {e}")
             return None, "failed to start session"
+
+        _maybe_open_display_window(tmux_session)
 
         # claude --resume has strictly more to do before its first prompt
         # is interactive than a brand-new session does (load + replay the
@@ -955,7 +1105,12 @@ def parse_transcript_line(line, line_no):
         else:
             error_type = "api_error"
         role = "error"
-    if role == "user":
+    if role == "user" and d.get("isMeta") is True:
+        # Harness-injected meta turn (e.g. the "[Image: original WxH ...]"
+        # note that follows a screenshot Read) -- role is "user" on the wire
+        # but the human never typed it; it rendered as a YOU bubble.
+        role = "tool_result"
+    elif role == "user":
         if isinstance(content, list):
             # A tool result is *also* wire-formatted as a `type: "user"`
             # line with message.role "user" -- it's the output of a
@@ -1180,7 +1335,7 @@ def list_conversations(account_filter=None):
                 continue
             live_info = live.get(meta["id"])
             if live_info:
-                meta["live"] = {"pane": live_info["pane"], "confidence": live_info["confidence"]}
+                meta["live"] = {"pane": live_info["pane"], "confidence": live_info["confidence"], "status": live_info.get("status")}
                 if meta["account"] == "unknown":
                     meta["account"] = live_info["dir_key"]
             else:

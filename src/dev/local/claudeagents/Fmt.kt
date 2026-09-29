@@ -17,6 +17,15 @@ object Fmt {
         }
     }
 
+    // "29 Sep 14:32" (local time); year only when not the current one.
+    fun stamp(epochMs: Long): String {
+        val cal = java.util.Calendar.getInstance()
+        val thisYear = cal.get(java.util.Calendar.YEAR)
+        cal.timeInMillis = epochMs
+        val pattern = if (cal.get(java.util.Calendar.YEAR) == thisYear) "d MMM HH:mm" else "d MMM yyyy HH:mm"
+        return java.text.SimpleDateFormat(pattern, java.util.Locale.getDefault()).format(java.util.Date(epochMs))
+    }
+
     // Same idea as the desktop panel's fmtTokens (ClaudeUsageExpanded.qml):
     // 135242 -> "135k", 850 -> "850", null (no assistant usage recorded
     // yet, e.g. a brand-new conversation) -> "--".

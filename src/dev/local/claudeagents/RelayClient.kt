@@ -131,6 +131,17 @@ class RelayClient(context: Context) {
         return request("POST", "/api/v1/conversations/$sessionId/resume", body, readTimeoutMs = 25000)
     }
 
+    // ChatActivity's overflow-menu "Restart session" action -- interrupts
+    // the live tmux pane (Ctrl-C) and relaunches `claude --resume
+    // <sessionId> --dangerously-skip-permissions` in that SAME pane (see
+    // claude-agents-daemon.py's restart_session). Only acts on a
+    // currently-live conversation, unlike resume() which handles the
+    // "no live pane at all" case by opening a brand-new one. Generous
+    // timeout to match spawn()/resume(): a resumed session has the whole
+    // prior transcript to reload before it's interactive again.
+    fun restart(sessionId: String): JSONObject =
+        request("POST", "/api/v1/conversations/$sessionId/restart", JSONObject(), readTimeoutMs = 25000)
+
     // Same base64-in-JSON shape the daemon expects (see claude-agents-daemon.py --
     // deliberately not multipart, a hand-rolled multipart parser is itself a
     // common source of bugs; base64 via android.util.Base64 (platform, not a
@@ -192,7 +203,8 @@ class RelayClient(context: Context) {
                         mtime = c.optDouble("mtime", 0.0),
                         lineCount = c.optInt("line_count", 0),
                         tokens = if (c.isNull("tokens")) null else c.optInt("tokens"),
-                        livePane = live?.optString("pane")
+                        livePane = live?.optString("pane"),
+                        liveStatus = if (live == null || live.isNull("status")) null else live.optString("status")
                     )
                 )
             }

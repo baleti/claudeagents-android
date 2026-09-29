@@ -43,6 +43,21 @@ object Markdown {
         return out
     }
 
+    // The plain text this app actually sends for TTS/read-aloud, for a
+    // message whose markdown renders as exactly one plain-text segment (no
+    // table) -- shared by ChatActivity (what gets SENT to the TTS server,
+    // see readAloudFrom) and MessageAdapter (what's safe to word-highlight
+    // on screen, see highlightableText), so the two can never disagree
+    // about what "the text being read" actually is. Null for anything more
+    // complex (a table, multiple segments) -- callers fall back to the raw
+    // markdown source for those, accepting no highlight for that message
+    // (a table/multi-segment layout has no single linear text a highlight
+    // span could safely land in anyway).
+    fun singleSegmentPlainText(text: String, dimColor: Int): String? {
+        val seg = renderSegments(text, dimColor).singleOrNull() as? MdSegment.Text ?: return null
+        return seg.spanned.toString()
+    }
+
     fun renderSegments(text: String, dimColor: Int): List<MdSegment> {
         val segments = mutableListOf<MdSegment>()
         val lines = text.split("\n")

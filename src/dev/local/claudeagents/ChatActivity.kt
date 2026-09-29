@@ -1475,7 +1475,7 @@ class ChatActivity : Activity() {
                 )
                 ChatDisplayRow("user", row.caption, status, id = "attachment_${row.id}", attachment = info) to row.createdAt
             }
-        adapter.items = (messages + pendingOutbox + pendingAttachments).sortedBy { it.second }.map { it.first }
+        adapter.items = (messages + pendingOutbox + pendingAttachments).sortedBy { it.second }.map { it.first.copy(tsMs = it.second) }
         extendReadAloudIfActive()
         if (nearBottom) {
             listView.post {

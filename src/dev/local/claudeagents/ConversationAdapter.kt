@@ -9,6 +9,7 @@ import android.view.ViewGroup
 import android.widget.BaseAdapter
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 
 /**
  * Compact table, not stacked cards -- mirrors (a miniaturized version of)
@@ -22,6 +23,7 @@ import android.widget.TextView
  */
 object ConversationColumns {
     const val account = 26
+    const val status = 22
     const val tokens = 46
     const val ago = 40
 
@@ -40,6 +42,21 @@ object ConversationColumns {
         // applied alongside it in ConversationAdapter.getView).
         else -> "–"
     }
+
+    // Session status glyph + its tap-tooltip text, from the daemon's
+    // live.status (busy/idle/waiting from Claude Code's own sessions file,
+    // frozen/stopped from the process itself -- same states and colors as
+    // the desktop panel's status column). Tooltips stay one short word.
+    class StatusStyle(val glyph: String, val color: Int, val label: String)
+
+    fun statusStyle(status: String?): StatusStyle = when (status) {
+        "busy" -> StatusStyle("●", Theme.primary, "busy")
+        "idle" -> StatusStyle("○", Theme.muted, "idle")
+        "waiting" -> StatusStyle("◐", Theme.secondary, "waiting")
+        "frozen" -> StatusStyle("❄", Theme.syntaxNumber, "frozen")
+        "stopped" -> StatusStyle("■", Theme.muted, "stopped")
+        else -> StatusStyle("·", Theme.muted, "unknown")
+    }
 }
 
 // showTokens = false drops the TKNS column entirely (not just blanked --
@@ -47,7 +64,11 @@ object ConversationColumns {
 // drawer's copy of this list, which is a narrow 300dp quick-switch panel
 // with no room to spare for a column that matters far less there than on
 // the full-width main table.
-class ConversationAdapter(private val context: Context, private val showTokens: Boolean = true) : BaseAdapter() {
+class ConversationAdapter(
+    private val context: Context,
+    private val showTokens: Boolean = true,
+    private val showStatus: Boolean = true
+) : BaseAdapter() {
     var items: List<ConversationRow> = emptyList()
         set(value) {
             field = value
@@ -59,7 +80,7 @@ class ConversationAdapter(private val context: Context, private val showTokens: 
     override fun getItemId(position: Int): Long = items[position].id.hashCode().toLong()
 
     private class Holder(
-        val account: TextView, val title: TextView,
+        val account: TextView, val status: TextView?, val title: TextView,
         val tokens: TextView?, val ago: TextView
     )
 
@@ -92,6 +113,17 @@ class ConversationAdapter(private val context: Context, private val showTokens: 
             account.gravity = Gravity.CENTER
             account.ellipsize = android.text.TextUtils.TruncateAt.END
             dataRow.addView(account, LinearLayout.LayoutParams(dp(ConversationColumns.account), LinearLayout.LayoutParams.WRAP_CONTENT))
+
+            val status = if (showStatus) {
+                TextView(context).also {
+                    it.textSize = 13f
+                    it.gravity = Gravity.CENTER
+                    it.maxLines = 1
+                    dataRow.addView(it, LinearLayout.LayoutParams(dp(ConversationColumns.status), LinearLayout.LayoutParams.WRAP_CONTENT))
+                }
+            } else {
+                null
+            }
 
             val title = TextView(context)
             title.textSize = 13f
@@ -128,7 +160,7 @@ class ConversationAdapter(private val context: Context, private val showTokens: 
             row.addView(divider, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)))
 
             view = row
-            holder = Holder(account, title, tokens, ago)
+            holder = Holder(account, status, title, tokens, ago)
             view.tag = holder
         } else {
             view = convertView
@@ -139,6 +171,14 @@ class ConversationAdapter(private val context: Context, private val showTokens: 
         val isKnownAccount = c.account in setOf("claude", "claude2", "claude3")
         holder.account.text = ConversationColumns.accountNumber(c.account)
         holder.account.setTextColor(if (isKnownAccount) Theme.onSurfaceVariant else Theme.muted and 0x66FFFFFF.toInt())
+        holder.status?.let { sv ->
+            val st = ConversationColumns.statusStyle(c.liveStatus)
+            sv.text = st.glyph
+            sv.setTextColor(st.color)
+            // Tap shows the state name; consumes the tap so it doesn't
+            // also open the conversation.
+            sv.setOnClickListener { Toast.makeText(context, st.label, Toast.LENGTH_SHORT).show() }
+        }
         holder.title.text = c.title
         holder.title.setTextColor(Theme.onBackground)
         holder.tokens?.text = Fmt.tokens(c.tokens)

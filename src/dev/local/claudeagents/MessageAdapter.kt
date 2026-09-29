@@ -93,17 +93,19 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
     private fun highlightableText(m: ChatDisplayRow): CharSequence? {
         if (m.toolItems != null || m.attachment != null) return null
         if (m.role == "user") return m.text
-        // Assistant markdown rendering can shift character offsets from
-        // m.text (what ReadAloudController actually sent to the TTS
-        // server and computed word ranges against) -- only safe to
-        // highlight when rendering happens to be a no-op (single segment,
-        // rendered string identical to the raw source), otherwise a
-        // highlight would land on the wrong word or corrupt a
-        // table/multi-segment layout entirely. See MessageAdapter's
-        // getView for the matching fallback when this returns null.
+        // ChatActivity.readAloudFrom() now sends this SAME rendered plain
+        // text (Markdown.singleSegmentPlainText) to the TTS server, not
+        // the raw markdown source -- so word-timing offsets always line up
+        // with what's shown here. Previously this required the rendered
+        // form to be byte-IDENTICAL to the raw source (i.e. only messages
+        // with no markdown at all), which real Claude replies almost never
+        // satisfy, silently disabling highlighting for nearly every
+        // message (reported live 2026-09-21: "still isn't highlighting").
+        // Only requirement left: a single plain-text segment, no table --
+        // see MessageAdapter's getView for the matching fallback when this
+        // returns null.
         val segments = Markdown.renderSegments(m.text, dimColor = Theme.muted)
-        val seg = segments.singleOrNull() as? MdSegment.Text ?: return null
-        return if (seg.spanned.toString() == m.text) seg.spanned else null
+        return (segments.singleOrNull() as? MdSegment.Text)?.spanned
     }
 
     private fun withHighlight(text: CharSequence, range: IntRange?): CharSequence {
@@ -132,7 +134,7 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
     // one sub-container per tool item), so unlike role/status it can't be a
     // single recycled TextView; it's cleared and rebuilt fresh on every
     // bind instead. Cheap enough for a chat-sized list.
-    private class Holder(val outer: LinearLayout, val bubble: LinearLayout, val role: TextView, val body: LinearLayout, val status: TextView)
+    private class Holder(val outer: LinearLayout, val bubble: LinearLayout, val role: TextView, val time: TextView, val body: LinearLayout, val status: TextView)
 
     override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
         val view: View
@@ -151,7 +153,28 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
             val role = TextView(context)
             role.setTypeface(Typeface.MONOSPACE, Typeface.BOLD)
             role.textSize = 11f
-            bubble.addView(role)
+            role.id = View.generateViewId()
+
+            val time = TextView(context)
+            time.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL)
+            time.textSize = 9f
+            time.setTextColor(Theme.muted)
+            time.maxLines = 1
+
+            // Role label left, timestamp pinned top-right (smaller font);
+            // RelativeLayout so the timestamp stays right-aligned even in a
+            // shrink-wrapped short bubble, never overlapping the label.
+            val header = android.widget.RelativeLayout(context)
+            header.addView(role, android.widget.RelativeLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            val timeLp = android.widget.RelativeLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            timeLp.addRule(android.widget.RelativeLayout.ALIGN_PARENT_END)
+            timeLp.addRule(android.widget.RelativeLayout.END_OF, role.id)
+            timeLp.addRule(android.widget.RelativeLayout.ALIGN_BASELINE, role.id)
+            timeLp.marginStart = dp(14)
+            header.addView(time, timeLp)
+            bubble.addView(header)
 
             val body = LinearLayout(context)
             body.orientation = LinearLayout.VERTICAL
@@ -164,7 +187,7 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
 
             outer.addView(bubble)
             view = outer
-            holder = Holder(outer, bubble, role, body, status)
+            holder = Holder(outer, bubble, role, time, body, status)
             view.tag = holder
         } else {
             view = convertView
@@ -243,6 +266,8 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
             isBundle -> Theme.muted
             else -> Theme.secondary
         })
+
+        holder.time.text = if (m.tsMs > 0L) Fmt.stamp(m.tsMs) else ""
 
         holder.body.removeAllViews()
         if (isError) {

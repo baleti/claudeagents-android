@@ -217,7 +217,7 @@ class ArchiveActivity : Activity() {
         listView.divider = null
         listView.dividerHeight = 0
         listView.setBackgroundColor(Theme.bg)
-        val a = ConversationAdapter(this)
+        val a = ConversationAdapter(this, showStatus = false)
         adapter = a
         listView.adapter = a
         listView.onItemClickListener = AdapterView.OnItemClickListener { _, _, position, _ ->

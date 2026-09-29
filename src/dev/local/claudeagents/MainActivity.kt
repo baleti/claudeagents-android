@@ -780,6 +780,10 @@ class MainActivity : Activity() {
         row.orientation = LinearLayout.HORIZONTAL
         row.setPadding(dp(12), dp(6), dp(12), dp(6))
         row.addView(headerLabel("ACCT", ConversationColumns.account))
+        val statusHeader = headerLabel("S", ConversationColumns.status)
+        statusHeader.gravity = Gravity.CENTER
+        statusHeader.setOnClickListener { Toast.makeText(this, "status", Toast.LENGTH_SHORT).show() }
+        row.addView(statusHeader)
         val title = headerLabel("TITLE", 0)
         val titleParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         titleParams.marginStart = dp(8)

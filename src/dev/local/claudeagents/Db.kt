@@ -59,7 +59,7 @@ private class NonDestructiveErrorHandler : DatabaseErrorHandler {
 // never typed into an archived conversation, since that flow didn't exist
 // yet.
 class Db private constructor(context: Context) : SQLiteOpenHelper(
-    context.applicationContext, "claudeagents.db", null, 7, NonDestructiveErrorHandler()
+    context.applicationContext, "claudeagents.db", null, 8, NonDestructiveErrorHandler()
 ) {
     init {
         // WAL mode: readers (the poll thread, sync, list queries) never
@@ -111,7 +111,8 @@ class Db private constructor(context: Context) : SQLiteOpenHelper(
                 mtime REAL,
                 line_count INTEGER,
                 tokens INTEGER,
-                live_pane TEXT
+                live_pane TEXT,
+                live_status TEXT
             )"""
         )
         db.execSQL(
@@ -225,6 +226,7 @@ class Db private constructor(context: Context) : SQLiteOpenHelper(
             put("line_count", c.lineCount)
             if (c.tokens != null) put("tokens", c.tokens) else putNull("tokens")
             put("live_pane", c.livePane)
+            put("live_status", c.liveStatus)
         }
         writableDatabase.insertWithOnConflict("conversations", null, cv, SQLiteDatabase.CONFLICT_REPLACE)
     }
@@ -235,7 +237,7 @@ class Db private constructor(context: Context) : SQLiteOpenHelper(
     // into has since ended (see ChatActivity's outbox status computation).
     fun getConversation(id: String): ConversationRow? {
         readableDatabase.rawQuery(
-            "SELECT id, account, account_label, title, mtime, line_count, tokens, live_pane FROM conversations WHERE id = ?",
+            "SELECT id, account, account_label, title, mtime, line_count, tokens, live_pane, live_status FROM conversations WHERE id = ?",
             arrayOf(id)
         ).use {
             if (!it.moveToFirst()) return null
@@ -247,7 +249,8 @@ class Db private constructor(context: Context) : SQLiteOpenHelper(
                 mtime = it.getDouble(4),
                 lineCount = it.getInt(5),
                 tokens = if (it.isNull(6)) null else it.getInt(6),
-                livePane = it.getString(7)
+                livePane = it.getString(7),
+                liveStatus = it.getString(8)
             )
         }
     }
@@ -255,7 +258,7 @@ class Db private constructor(context: Context) : SQLiteOpenHelper(
     fun listConversations(): List<ConversationRow> {
         val out = mutableListOf<ConversationRow>()
         val cur = readableDatabase.rawQuery(
-            "SELECT id, account, account_label, title, mtime, line_count, tokens, live_pane FROM conversations ORDER BY mtime DESC",
+            "SELECT id, account, account_label, title, mtime, line_count, tokens, live_pane, live_status FROM conversations ORDER BY mtime DESC",
             null
         )
         cur.use {
@@ -269,7 +272,8 @@ class Db private constructor(context: Context) : SQLiteOpenHelper(
                         mtime = it.getDouble(4),
                         lineCount = it.getInt(5),
                         tokens = if (it.isNull(6)) null else it.getInt(6),
-                        livePane = it.getString(7)
+                        livePane = it.getString(7),
+                        liveStatus = it.getString(8)
                     )
                 )
             }
