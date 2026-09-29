@@ -174,7 +174,7 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
             timeLp.addRule(android.widget.RelativeLayout.ALIGN_BASELINE, role.id)
             timeLp.marginStart = dp(14)
             header.addView(time, timeLp)
-            bubble.addView(header)
+            bubble.addView(header, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
             val body = LinearLayout(context)
             body.orientation = LinearLayout.VERTICAL
