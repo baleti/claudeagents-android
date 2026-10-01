@@ -1613,10 +1613,15 @@ class ChatActivity : Activity() {
         polling.set(true)
         pollThread = Thread {
             val client = RelayClient(this)
+            // First poll after opening returns fast: a question already pending
+            // (or a status already 'waiting') produces no change to wake a
+            // long-poll, so it would otherwise sit for the full 25s.
+            var firstPoll = true
             while (polling.get()) {
                 try {
                     val since = db.getMaxLine(sessionId)
-                    val resp = client.stream(sessionId, since, 25)
+                    val resp = client.stream(sessionId, since, if (firstPoll) 1 else 25)
+                    firstPoll = false
                     val msgs = RelayClient.parseMessages(resp)
                     var changed = false
                     if (msgs.isNotEmpty()) {
