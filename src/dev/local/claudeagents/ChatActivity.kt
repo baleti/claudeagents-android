@@ -86,6 +86,7 @@ class ChatActivity : Activity() {
     private var commandPopup: PopupWindow? = null
     private var thinkingRow: View? = null
     private var contextBannerView: View? = null
+    private var questionCard: QuestionCard? = null
     private var contextBannerLabel: TextView? = null
     private var pendingAttachmentCaption: String = ""
     // Reuses the exact same TTS server + WebSocketClient/TtsPlaybackService
@@ -244,6 +245,7 @@ class ChatActivity : Activity() {
         listView.divider = null
         listView.dividerHeight = 0
         listView.setBackgroundColor(Theme.bg)
+        listView.isFastScrollEnabled = true
         // Hidden until loadCached()'s first pass has actually scrolled to
         // the bottom -- that scroll only takes effect inside a post()
         // (and a delayed second pass after it), so the very first frame(s)
@@ -283,6 +285,14 @@ class ChatActivity : Activity() {
         thinking.addView(thinkingLabel, thinkingLabelParams)
         root.addView(thinking)
         thinkingRow = thinking
+
+        val qCard = QuestionCard(
+            this,
+            onSubmit = { id, answers -> submitAnswer(id, answers, false) },
+            onDismiss = { id -> submitAnswer(id, null, true) }
+        )
+        root.addView(qCard.view, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+        questionCard = qCard
 
         readAloud = ReadAloudController(
             context = this,
@@ -1579,6 +1589,25 @@ class ChatActivity : Activity() {
         return changed
     }
 
+    private fun submitAnswer(toolUseId: String, answers: org.json.JSONArray?, dismiss: Boolean) {
+        Thread {
+            try {
+                RelayClient(this).answer(sessionId, toolUseId, answers, dismiss)
+                runOnUiThread { questionCard?.done(toolUseId) }
+            } catch (e: Exception) {
+                val gone = (e as? RelayException)?.code == 409
+                runOnUiThread {
+                    if (gone) questionCard?.done(toolUseId) else questionCard?.failed()
+                    android.widget.Toast.makeText(
+                        this,
+                        if (gone) "Question is no longer pending" else "Couldn't send answer - try again",
+                        android.widget.Toast.LENGTH_SHORT
+                    ).show()
+                }
+            }
+        }.start()
+    }
+
     private fun startPolling() {
         if (polling.get()) return
         polling.set(true)
@@ -1602,7 +1631,9 @@ class ChatActivity : Activity() {
                     // indicator needs to track that regardless.
                     val busy = resp.optString("status", "") == "busy"
                     val contextPct = if (resp.isNull("context_pct")) null else resp.optInt("context_pct", -1).takeIf { it >= 0 }
+                    val question = resp.optJSONObject("question")
                     runOnUiThread {
+                        questionCard?.update(question)
                         thinkingRow?.visibility = if (busy) View.VISIBLE else View.GONE
                         updateContextBanner(contextPct)
                         if (changed) loadCached()

@@ -115,6 +115,15 @@ class RelayClient(context: Context) {
         return request("POST", "/api/v1/conversations/$sessionId/send", body)
     }
 
+    // Answer (or dismiss) the pending AskUserQuestion `toolUseId`; the daemon
+    // types the choices into the live TUI. 409 = question no longer pending.
+    fun answer(sessionId: String, toolUseId: String, answers: JSONArray?, dismiss: Boolean = false): JSONObject {
+        val body = JSONObject()
+        body.put("tool_use_id", toolUseId)
+        if (dismiss) body.put("dismiss", true) else body.put("answers", answers)
+        return request("POST", "/api/v1/conversations/$sessionId/answer", body, readTimeoutMs = 25000)
+    }
+
     // Archive view's equivalent of send() -- for a conversation with no
     // live tmux pane, the daemon relaunches it via `claude --resume
     // <sessionId>` in a fresh tmux session (same cwd/account it originally
