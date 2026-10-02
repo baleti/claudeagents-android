@@ -324,6 +324,12 @@ class Db private constructor(context: Context) : SQLiteOpenHelper(
         return 0
     }
 
+    /** Drops cached messages past `line` -- after a server-side restore the
+     * transcript is shorter and new messages will reuse those line numbers. */
+    fun deleteMessagesAfter(conversationId: String, line: Int) {
+        writableDatabase.delete("messages", "conversation_id = ? AND line > ?", arrayOf(conversationId, line.toString()))
+    }
+
     fun insertMessages(conversationId: String, msgs: List<MessageRow>) {
         val db = writableDatabase
         db.beginTransaction()

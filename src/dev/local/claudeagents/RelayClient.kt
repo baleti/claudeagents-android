@@ -151,6 +151,16 @@ class RelayClient(context: Context) {
     fun restart(sessionId: String): JSONObject =
         request("POST", "/api/v1/conversations/$sessionId/restart", JSONObject(), readTimeoutMs = 25000)
 
+    // Conversation-only restore (never code): the daemon cuts the transcript
+    // right after transcript line `line` (backing the original up first) and
+    // relaunches the session if it was live. Generous timeout: it has to
+    // stop and re-load a whole session.
+    fun restore(sessionId: String, line: Int): JSONObject {
+        val body = JSONObject()
+        body.put("line", line)
+        return request("POST", "/api/v1/conversations/$sessionId/restore", body, readTimeoutMs = 45000)
+    }
+
     // Same base64-in-JSON shape the daemon expects (see claude-agents-daemon.py --
     // deliberately not multipart, a hand-rolled multipart parser is itself a
     // common source of bugs; base64 via android.util.Base64 (platform, not a

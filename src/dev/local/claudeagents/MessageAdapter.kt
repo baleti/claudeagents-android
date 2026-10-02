@@ -408,8 +408,14 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
 
     private fun showMessageMenu(anchor: View, tapX: Float, tapY: Float, m: ChatDisplayRow) {
         val activity = context as? ChatActivity ?: return
-        Theme.showMenu(context, anchor, listOf("Copy message", "Read aloud from here"), tapX.toInt(), tapY.toInt()) { choice ->
+        // Only a synced transcript row has a line number to restore to
+        // (not an "outbox_<id>" one that hasn't landed yet).
+        val line = m.id?.toIntOrNull()
+        val options = mutableListOf("Copy message", "Read aloud from here")
+        if (line != null) options.add("Restore conversation to here")
+        Theme.showMenu(context, anchor, options, tapX.toInt(), tapY.toInt()) { choice ->
             when (choice) {
+                "Restore conversation to here" -> if (line != null) activity.confirmRestoreTo(line)
                 "Copy message" -> activity.copyMessage(m.text)
                 "Read aloud from here" -> m.id?.let { activity.readAloudFrom(it) }
             }

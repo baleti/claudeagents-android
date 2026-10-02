@@ -20,6 +20,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import socketserver
 import subprocess
 import sys
@@ -1044,7 +1045,8 @@ def resume_session(session_id, initial_text):
     `initial_text` -- the archive view's equivalent of spawn_session for a
     brand-new conversation. Returns (session_id, error); error is None on
     success. Safe to call even if another /resume call for the same
-    session_id is racing this one -- see _resume_lock_for."""
+    session_id is racing this one -- see _resume_lock_for. initial_text=None
+    just relaunches without typing anything (used by restore)."""
     lock = _resume_lock_for(session_id)
     with lock:
         # Re-check live status under the lock: either a racing /resume call
@@ -1054,6 +1056,8 @@ def resume_session(session_id, initial_text):
         # instead of spawning a second process against the same session id.
         live = get_live_sessions().get(session_id)
         if live:
+            if initial_text is None:
+                return session_id, None
             ok = send_to_pane(live["pane"], initial_text)
             if ok:
                 return session_id, None
@@ -1091,6 +1095,8 @@ def resume_session(session_id, initial_text):
         # is interactive than a brand-new session does (load + replay the
         # whole prior transcript) -- spawn_session's 2s undershoots this
         # for anything but a short conversation.
+        if initial_text is None:
+            return session_id, None
         time.sleep(4)
 
         if not send_to_pane(f"{tmux_session}:0.0", initial_text):
@@ -1098,6 +1104,106 @@ def resume_session(session_id, initial_text):
             return None, "session resumed but initial message failed to send"
 
         return session_id, None
+
+
+_restore_lock = threading.Lock()
+RESTORE_BACKUP_DIR = HOME / ".cache" / "claude-agents" / "restore-backups"
+
+
+def _line_is_clean_boundary(d):
+    """True if a transcript can safely END right after this entry: a user
+    prompt (not a tool_result) or an assistant turn with no tool_use --
+    anything else leaves a dangling tool_use/tool_result pair that
+    `claude --resume` rejects."""
+    t = d.get("type")
+    content = (d.get("message") or {}).get("content")
+    blocks = content if isinstance(content, list) else []
+    kinds = {b.get("type") for b in blocks if isinstance(b, dict)}
+    if t == "user":
+        return "tool_result" not in kinds
+    if t == "assistant":
+        return "tool_use" not in kinds
+    return False
+
+
+def truncate_transcript_after(path, line_no):
+    """Conversation-only restore: cuts the jsonl right after message line
+    `line_no` (0-based, same numbering as parse_transcript_line), backing
+    the full original up first. Never touches any code/files. Walks back
+    to the nearest clean boundary if that line sits mid tool exchange.
+    Returns (kept_line, error)."""
+    offsets = []  # (byte_end, parsed-or-None) per line
+    with open(path, "rb") as f:
+        pos = 0
+        for raw in f:
+            pos += len(raw)
+            try:
+                d = json.loads(raw)
+            except Exception:
+                d = None
+            offsets.append((pos, d))
+    if line_no < 0 or line_no >= len(offsets):
+        return None, "line out of range"
+    first = offsets[line_no][1]
+    if not first or first.get("type") not in ("user", "assistant"):
+        return None, "not a message line"
+    keep = line_no
+    while keep >= 0:
+        d = offsets[keep][1]
+        if d and _line_is_clean_boundary(d):
+            break
+        keep -= 1
+    if keep < 0:
+        return None, "no safe restore point at or before that message"
+    if keep == len(offsets) - 1:
+        return keep, None  # already the end -- nothing to cut
+    RESTORE_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    backup = RESTORE_BACKUP_DIR / f"{Path(path).stem}-{time.strftime('%Y%m%d-%H%M%S')}-{secrets.token_hex(2)}.jsonl"
+    shutil.copy2(path, backup)
+    os.truncate(path, offsets[keep][0])
+    log(f"restore: truncated {path} after line {keep} (requested {line_no}); backup {backup}")
+    return keep, None
+
+
+def _pane_exists(pane_target):
+    r = subprocess.run(["tmux", "display-message", "-p", "-t", pane_target, "#{pane_id}"],
+                       capture_output=True, timeout=5)
+    return r.returncode == 0
+
+
+def restore_conversation(session_id, line_no):
+    """Restores the conversation (never code) to message `line_no`. A live
+    session is stopped first -- claude would otherwise keep appending to
+    the file we're cutting -- then relaunched with --resume afterward.
+    Returns (kept_line, error)."""
+    path = find_conversation_path(session_id)
+    if not path:
+        return None, "conversation not found"
+    live = get_live_sessions().get(session_id)
+    pane = live["pane"] if live else None
+    if pane:
+        thaw_pane_if_frozen(pane)
+        # Ctrl-C once interrupts a busy turn, twice quits an idle one.
+        for _ in range(2):
+            subprocess.run(["tmux", "send-keys", "-t", pane, "C-c"], timeout=5)
+            time.sleep(0.6)
+        for _ in range(20):
+            if session_id not in scan_live_sessions():
+                break
+            time.sleep(0.5)
+        else:
+            return None, "couldn't stop the running session"
+    kept, err = truncate_transcript_after(path, line_no)
+    if err:
+        # Session was already stopped; bring it back unchanged.
+        if pane:
+            resume_session(session_id, None)
+        return None, err
+    if pane:
+        _, rerr = resume_session(session_id, None)
+        if rerr:
+            return kept, f"restored, but relaunch failed: {rerr}"
+    return kept, None
 
 
 def live_scan_loop():
@@ -1861,6 +1967,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if not ok:
                 return self._reject(409, err or "failed")
             return self._ok({"ok": True})
+
+        m = re.match(r"^/api/v1/conversations/([0-9a-fA-F-]{36})/restore$", path)
+        if m:
+            if rate_limited(ip, "spawn", limit=5, window=60):
+                log(f"deny: restore rate limited {ip}")
+                return self._reject(429, "rate limited")
+            session_id = m.group(1)
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > 10_000:
+                return self._reject(400, "bad request")
+            try:
+                body = json.loads(self.rfile.read(length))
+            except Exception:
+                return self._reject(400, "bad json")
+            line_no = body.get("line")
+            if not isinstance(line_no, int) or isinstance(line_no, bool):
+                return self._reject(400, "bad line")
+            with _restore_lock:  # NOT _resume_lock_for: resume_session takes that one itself
+                kept, err = restore_conversation(session_id, line_no)
+            log(f"restore: {session_id} line={line_no} from {ip}: {'ok kept=' + str(kept) if not err else err}")
+            if err and kept is None:
+                return self._reject(409, err)
+            return self._ok({"ok": True, "kept_line": kept, "warning": err})
 
         m = re.match(r"^/api/v1/conversations/([0-9a-fA-F-]{36})/resume$", path)
         if m:

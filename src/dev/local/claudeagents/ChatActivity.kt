@@ -978,6 +978,35 @@ class ChatActivity : Activity() {
         }.apply { isDaemon = true; name = "RestartSession"; start() }
     }
 
+    // Conversation-only restore, asked for explicitly: never touches code or
+    // files. The daemon backs up the full transcript before cutting it.
+    fun confirmRestoreTo(line: Int) {
+        AlertDialog.Builder(this)
+            .setTitle("Restore conversation to this message?")
+            .setMessage("Everything after this message is removed from the conversation (a backup is kept on host3). Code and files are not changed. A running session is restarted.")
+            .setPositiveButton("Restore") { _, _ -> restoreTo(line) }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun restoreTo(line: Int) {
+        Toast.makeText(this, "Restoring conversation…", Toast.LENGTH_SHORT).show()
+        Thread {
+            try {
+                val resp = RelayClient(this).restore(sessionId, line)
+                val kept = resp.optInt("kept_line", line)
+                db.deleteMessagesAfter(sessionId, kept)
+                val warning = if (resp.isNull("warning")) null else resp.optString("warning")
+                runOnUiThread {
+                    loadCached()
+                    Toast.makeText(this, warning ?: "Conversation restored", Toast.LENGTH_LONG).show()
+                }
+            } catch (e: Exception) {
+                runOnUiThread { Toast.makeText(this, "Restore failed: ${e.message}", Toast.LENGTH_LONG).show() }
+            }
+        }.apply { isDaemon = true; name = "RestoreConversation"; start() }
+    }
+
     private fun updateContextBanner(pct: Int?) {
         if (pct != null && pct >= CONTEXT_WARN_PCT) {
             contextBannerLabel?.text = "Context $pct% full — replies may start failing"
