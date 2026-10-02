@@ -513,7 +513,9 @@ def _pane_input_box_text(pane_target):
     lines = out.rstrip("\n").split("\n")
 
     def is_rule(s):
-        return bool(s) and set(s) <= {"─", "-"}
+        # Claude draws the border pure, or with a session-name label embedded
+        # ("──── helper-adb ─") -- both start with a run of rule characters.
+        return bool(s) and (set(s) <= {"─", "-"} or s.startswith("───"))
 
     # The input box is bounded by its own top and bottom horizontal-rule
     # border, always drawn even when the box is empty -- the LAST two rule
