@@ -222,7 +222,11 @@ class Db private constructor(context: Context) : SQLiteOpenHelper(
             put("account", c.account)
             put("account_label", c.accountLabel)
             put("title", c.title)
-            put("mtime", c.mtime)
+            // Never let a sync move a row's age backwards: a message just
+            // sent from this phone bumps mtime locally (touchConversation)
+            // before host3's transcript has it, so the server's older value
+            // would otherwise yank the row back down until delivery.
+            put("mtime", maxOf(c.mtime, getConversation(c.id)?.mtime ?: 0.0))
             put("line_count", c.lineCount)
             if (c.tokens != null) put("tokens", c.tokens) else putNull("tokens")
             put("live_pane", c.livePane)
@@ -386,6 +390,16 @@ class Db private constructor(context: Context) : SQLiteOpenHelper(
         return out
     }
 
+    // Local, immediate age bump for a conversation the user just sent to, so
+    // it jumps to the top of the list without waiting on host3.
+    fun touchConversation(conversationId: String) {
+        val now = System.currentTimeMillis() / 1000.0
+        writableDatabase.execSQL(
+            "UPDATE conversations SET mtime = ? WHERE id = ? AND mtime < ?",
+            arrayOf<Any>(now, conversationId, now)
+        )
+    }
+
     fun insertOutbox(conversationId: String, text: String, viaResume: Boolean = false): Long {
         val cv = ContentValues().apply {
             put("conversation_id", conversationId)
@@ -403,7 +417,9 @@ class Db private constructor(context: Context) : SQLiteOpenHelper(
         // singleton note above). This is the one write in the whole app
         // that must never fail silently: it's the only record that a send
         // was even attempted before the network is ever touched.
-        return writableDatabase.insertOrThrow("outbox", null, cv)
+        val id = writableDatabase.insertOrThrow("outbox", null, cv)
+        touchConversation(conversationId)
+        return id
     }
 
     private val OUTBOX_COLUMNS = "id, conversation_id, text, state, server_state, created_at, attempts, client_msg_id, via_resume"
@@ -482,7 +498,9 @@ class Db private constructor(context: Context) : SQLiteOpenHelper(
             put("attempts", 0)
             put("client_msg_id", java.util.UUID.randomUUID().toString())
         }
-        return writableDatabase.insertOrThrow("attachment_outbox", null, cv)
+        val id = writableDatabase.insertOrThrow("attachment_outbox", null, cv)
+        touchConversation(conversationId)
+        return id
     }
 
     private fun cursorToAttachmentOutboxRow(c: android.database.Cursor): AttachmentOutboxRow = AttachmentOutboxRow(
