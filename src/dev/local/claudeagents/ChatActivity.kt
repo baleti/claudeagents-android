@@ -241,11 +241,10 @@ class ChatActivity : Activity() {
         synthBanner = SynthesizingBanner(this)
         root.addView(synthBanner.view)
 
-        listView = ListView(this)
+        listView = ScrollerListView(this)
         listView.divider = null
         listView.dividerHeight = 0
         listView.setBackgroundColor(Theme.bg)
-        listView.isFastScrollEnabled = true
         // Hidden until loadCached()'s first pass has actually scrolled to
         // the bottom -- that scroll only takes effect inside a post()
         // (and a delayed second pass after it), so the very first frame(s)

@@ -213,11 +213,10 @@ class ArchiveActivity : Activity() {
         root.addView(totalLabel, totalLabelParams)
         totalCountLabel = totalLabel
 
-        val listView = ListView(this)
+        val listView = ScrollerListView(this)
         listView.divider = null
         listView.dividerHeight = 0
         listView.setBackgroundColor(Theme.bg)
-        listView.isFastScrollEnabled = true
         val a = ConversationAdapter(this, showStatus = false)
         adapter = a
         listView.adapter = a
@@ -258,7 +257,6 @@ class ArchiveActivity : Activity() {
     private var pullStartY = 0f
     private var pullTriggered = false
     private var pullDragging = false
-    private var pullIgnore = false
     private fun installPullToRefresh(listView: ListView, indicator: ProgressBar) {
         val thresholdPx = dp(70)
         val maxDragPx = dp(110).toFloat()
@@ -270,9 +268,8 @@ class ArchiveActivity : Activity() {
                     pullStartY = event.rawY
                     pullTriggered = false
                     pullDragging = false
-                    pullIgnore = event.x > listView.width - dp(40)
                 }
-                MotionEvent.ACTION_MOVE -> if (!pullIgnore) {
+                MotionEvent.ACTION_MOVE -> {
                     val atTop = listView.firstVisiblePosition == 0 &&
                         (listView.getChildAt(0)?.top ?: 0) >= 0
                     val delta = event.rawY - pullStartY
