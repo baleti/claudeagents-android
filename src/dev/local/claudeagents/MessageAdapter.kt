@@ -415,7 +415,7 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
         if (line != null) options.add("Restore conversation to here")
         Theme.showMenu(context, anchor, options, tapX.toInt(), tapY.toInt()) { choice ->
             when (choice) {
-                "Restore conversation to here" -> if (line != null) activity.confirmRestoreTo(line)
+                "Restore conversation to here" -> if (line != null) activity.restoreConversationTo(line)
                 "Copy message" -> activity.copyMessage(m.text)
                 "Read aloud from here" -> m.id?.let { activity.readAloudFrom(it) }
             }

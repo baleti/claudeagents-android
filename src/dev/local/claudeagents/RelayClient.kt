@@ -151,10 +151,17 @@ class RelayClient(context: Context) {
     fun restart(sessionId: String): JSONObject =
         request("POST", "/api/v1/conversations/$sessionId/restart", JSONObject(), readTimeoutMs = 25000)
 
-    // Conversation-only restore (never code): the daemon cuts the transcript
-    // right after transcript line `line` (backing the original up first) and
-    // relaunches the session if it was live. Generous timeout: it has to
-    // stop and re-load a whole session.
+    // Live session: the daemon drives the TUI's own rewind picker up to its
+    // confirm screen and returns that screen's options as a question (same
+    // shape as AskUserQuestion), answered through answer(). No restart.
+    fun rewind(sessionId: String, line: Int): JSONObject {
+        val body = JSONObject()
+        body.put("line", line)
+        return request("POST", "/api/v1/conversations/$sessionId/rewind", body, readTimeoutMs = 30000)
+    }
+
+    // Session with no live pane: the daemon backs up the transcript and cuts
+    // it after (or, for a user prompt, before) transcript line `line`.
     fun restore(sessionId: String, line: Int): JSONObject {
         val body = JSONObject()
         body.put("line", line)
@@ -190,6 +197,11 @@ class RelayClient(context: Context) {
     }
 
     companion object {
+        fun deadLines(obj: JSONObject): List<Int> {
+            val a = obj.optJSONArray("dead_lines") ?: return emptyList()
+            return List(a.length()) { a.getInt(it) }
+        }
+
         fun parseMessages(obj: JSONObject): List<MessageRow> {
             val out = mutableListOf<MessageRow>()
             val arr = obj.optJSONArray("messages") ?: return out

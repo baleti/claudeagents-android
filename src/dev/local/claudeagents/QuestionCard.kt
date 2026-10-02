@@ -37,6 +37,7 @@ class QuestionCard(
     private var submit: Button? = null
     private var busy = false
     private var doneId: String? = null
+    private var rewindMode = false
 
     init {
         view.visibility = View.GONE
@@ -61,7 +62,7 @@ class QuestionCard(
         if (id == currentId || id == doneId) return
         currentId = id
         busy = false
-        build(id, q.getJSONArray("questions"))
+        build(id, q.getJSONArray("questions"), q.optString("kind") == "rewind")
         view.layoutParams = (view.layoutParams as? LinearLayout.LayoutParams)
         view.visibility = View.VISIBLE
         view.post {
@@ -86,12 +87,13 @@ class QuestionCard(
         refreshSubmit()
     }
 
-    private fun build(id: String, qs: JSONArray) {
+    private fun build(id: String, qs: JSONArray, rewind: Boolean = false) {
+        rewindMode = rewind
         body.removeAllViews()
         view.layoutParams?.let { it.height = LinearLayout.LayoutParams.WRAP_CONTENT }
         val st = mutableListOf<QState>()
         val tag = TextView(context)
-        tag.text = "Claude is asking"
+        tag.text = if (rewind) "Rewind" else "Claude is asking"
         tag.textSize = 11f
         tag.setTypeface(null, Typeface.BOLD)
         tag.setTextColor(Theme.primary)
@@ -158,6 +160,7 @@ class QuestionCard(
             }
             paint()
 
+            if (rewind) continue
             val other = EditText(context)
             Theme.styleEditText(other, context)
             other.hint = "Or type your own answer"
@@ -185,7 +188,7 @@ class QuestionCard(
         actions.orientation = LinearLayout.HORIZONTAL
         actions.gravity = Gravity.END
         val dismiss = Button(context)
-        dismiss.text = "Dismiss"
+        dismiss.text = if (rewind) "Cancel" else "Dismiss"
         dismiss.isAllCaps = false
         dismiss.setTextColor(Theme.onSurfaceVariant)
         dismiss.background = Theme.roundedDrawable(Theme.surfaceContainer, context)
@@ -227,7 +230,7 @@ class QuestionCard(
         val b = submit ?: return
         val ready = !busy && states.isNotEmpty() && states.all { it.answered() }
         b.isEnabled = ready
-        b.text = if (busy) "Sending…" else "Submit"
+        b.text = if (busy) "Sending…" else if (rewindMode) "Rewind" else "Submit"
         b.setTextColor(if (ready) Theme.onPrimary else Theme.muted)
         b.background = Theme.roundedDrawable(if (ready) Theme.primary else Theme.surfaceContainer, context)
     }

@@ -324,6 +324,21 @@ class Db private constructor(context: Context) : SQLiteOpenHelper(
         return 0
     }
 
+    /** Drops cached rows for abandoned (rewound-away) branches; returns how many were removed. */
+    fun deleteMessages(conversationId: String, lines: List<Int>): Int {
+        if (lines.isEmpty()) return 0
+        val db = writableDatabase
+        var n = 0
+        db.beginTransaction()
+        try {
+            for (l in lines) n += db.delete("messages", "conversation_id = ? AND line = ?", arrayOf(conversationId, l.toString()))
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        return n
+    }
+
     /** Drops cached messages past `line` -- after a server-side restore the
      * transcript is shorter and new messages will reuse those line numbers. */
     fun deleteMessagesAfter(conversationId: String, line: Int) {

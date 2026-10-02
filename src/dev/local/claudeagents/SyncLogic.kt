@@ -84,8 +84,10 @@ object SyncLogic {
                     db.upsertConversation(c)
                     val localMax = db.getMaxLine(c.id)
                     if (c.lineCount > localMax) {
-                        val msgs = RelayClient.parseMessages(client.getMessages(c.id, localMax))
+                        val resp = client.getMessages(c.id, localMax)
+                        val msgs = RelayClient.parseMessages(resp)
                         if (msgs.isNotEmpty()) db.insertMessages(c.id, msgs)
+                        db.deleteMessages(c.id, RelayClient.deadLines(resp))
                     }
                 } catch (e: RelayException) {
                     if (e.code == 404) {
