@@ -535,6 +535,46 @@ def _pane_input_box_text(pane_target):
     return None
 
 
+def _input_box_all_text(pane_target):
+    """Every line of Claude's input box (multi-line prompts included), or
+    None if the box can't be located."""
+    out = _pane_text(pane_target)
+    lines = out.rstrip("\n").split("\n")
+
+    def is_rule(s):
+        return bool(s) and (set(s) <= {"─", "-"} or s.startswith("───"))
+
+    rules = [i for i, l in enumerate(lines) if is_rule(l.strip())]
+    if len(rules) < 2:
+        return None
+    body = [l.strip() for l in lines[rules[-2] + 1:rules[-1]]]
+    if body and body[0][:1] in ("❯", ">"):
+        body[0] = body[0][1:].strip()
+    else:
+        return None
+    text = "\n".join(body).strip()
+    # Fresh sessions show a greyed placeholder in an empty box.
+    if re.fullmatch(r'Try "[^"\n]*"', text):
+        return ""
+    return text
+
+
+def clear_input_box(pane_target, max_presses=80):
+    """Empties Claude's input box. Ctrl+U deletes just one line at a time in
+    a multi-line prompt, so repeat until the whole box reads empty. Only
+    call when anything in the box is known to be unwanted (e.g. the prompt
+    the TUI puts back after a rewind). Returns True if the box is empty."""
+    for _ in range(max_presses):
+        text = _input_box_all_text(pane_target)
+        if text is None:
+            return False
+        if not text:
+            return True
+        _tmux_keys(pane_target, "C-u")
+        time.sleep(0.08)
+    return _input_box_all_text(pane_target) == ""
+
+
 FREEZE_TOGGLE_SCRIPT = os.path.expanduser("~/.config/tmux/scripts/freeze-process-cgroup-toggle.sh")
 
 
@@ -1436,7 +1476,7 @@ def rewind_start(session_id, line_no):
         screen = _pane_text(pane)
         if _on_rewind_screen(screen) or "to interrupt" in screen:
             return None, "session is busy or already showing a menu"
-        box = _pane_input_box_text(pane)
+        box = _input_box_all_text(pane)
         if box is None:
             return None, "can't read the input box"
         if box:
@@ -1584,6 +1624,15 @@ def rewind_choose(session_id, rid, choice):
             _rewind_abort(pane)
             del _rewind_pending[session_id]
             return False, "tmux failed"
+        # The TUI drops the rewound prompt back into the input box; we required
+        # the box to be empty before opening the rewind, so whatever is there
+        # now is that prompt. Left in place, the app's next send would be
+        # typed on top of it and the two would merge.
+        try:
+            if not clear_input_box(pane):
+                log(f"rewind_choose({pane}): couldn't confirm the input box was cleared")
+        except Exception as e:
+            log(f"rewind_choose({pane}): clearing input box failed: {e}")
         if "conversation" in label.lower() and not label.lower().startswith("summarize"):
             if p["uuid"]:
                 _add_mark(session_id, p["uuid"])
