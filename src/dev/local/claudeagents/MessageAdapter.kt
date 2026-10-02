@@ -707,7 +707,7 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
         // instead of silently clipped; it never fires for a table that
         // already fits, since a ScrollView with no scrollable excess is a
         // no-op wrapper.
-        val scroller = HorizontalScrollView(context)
+        val scroller = TableScrollView(context)
         scroller.isFillViewport = false
         scroller.overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS
         scroller.addView(grid, ViewGroup.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))

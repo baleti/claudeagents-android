@@ -339,6 +339,12 @@ class Db private constructor(context: Context) : SQLiteOpenHelper(
         return n
     }
 
+    /** Optimistic rewind: hide `line` and everything after it. Rollback is free --
+     * getMaxLine() drops back, so the next poll re-fetches the rows. */
+    fun deleteMessagesFrom(conversationId: String, line: Int) {
+        writableDatabase.delete("messages", "conversation_id = ? AND line >= ?", arrayOf(conversationId, line.toString()))
+    }
+
     /** Drops cached messages past `line` -- after a server-side restore the
      * transcript is shorter and new messages will reuse those line numbers. */
     fun deleteMessagesAfter(conversationId: String, line: Int) {

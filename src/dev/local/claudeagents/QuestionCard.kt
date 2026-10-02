@@ -81,6 +81,11 @@ class QuestionCard(
         update(null)
     }
 
+    // Undo done() when an optimistic hide turns out to have failed.
+    fun undo(id: String) {
+        if (doneId == id) doneId = null
+    }
+
     // Called after a failed submit/dismiss so the card is usable again.
     fun failed() {
         busy = false

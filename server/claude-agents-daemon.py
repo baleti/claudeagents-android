@@ -1498,6 +1498,7 @@ def rewind_start(session_id, line_no):
         question = {
             "id": rid,
             "kind": "rewind",
+            "target_line": target[0],
             "questions": [{
                 "header": "Rewind",
                 "question": "Restore to the point before you sent:\n\u201c" + (target[2].strip()[:300]) + "\u201d\n" + "\n".join(parsed["info"]),

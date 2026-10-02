@@ -87,6 +87,12 @@ class ChatActivity : Activity() {
     private var thinkingRow: View? = null
     private var contextBannerView: View? = null
     private var questionCard: QuestionCard? = null
+    // Rewind: the last rewind question seen (for its options/target), and the
+    // line from which the chat is hidden optimistically until the daemon's
+    // dead_lines confirms (or the call fails and we roll back).
+    private var rewindQuestion: org.json.JSONObject? = null
+    @Volatile private var optimisticCutFrom: Int? = null
+    @Volatile private var optimisticCutAt = 0L
     private var contextBannerLabel: TextView? = null
     private var pendingAttachmentCaption: String = ""
     // Reuses the exact same TTS server + WebSocketClient/TtsPlaybackService
@@ -992,6 +998,7 @@ class ChatActivity : Activity() {
         Thread {
             try {
                 val q = RelayClient(this).rewind(sessionId, line).getJSONObject("question")
+                rewindQuestion = q
                 runOnUiThread { questionCard?.update(q) }
             } catch (e: Exception) {
                 runOnUiThread { Toast.makeText(this, "Rewind not started: ${e.message?.substringAfter(": ")}", Toast.LENGTH_LONG).show() }
@@ -1636,19 +1643,52 @@ class ChatActivity : Activity() {
     }
 
     private fun submitAnswer(toolUseId: String, answers: org.json.JSONArray?, dismiss: Boolean) {
+        // Rewind choices that drop conversation are applied to the chat
+        // immediately; the daemon call confirms or we roll back.
+        val rq = rewindQuestion?.takeIf { it.optString("id") == toolUseId }
+        var cut: Int? = null
+        if (rq != null && !dismiss && answers != null) {
+            val idx = answers.optJSONObject(0)?.optJSONArray("selected")?.optInt(0, 0) ?: 0
+            val label = rq.optJSONArray("questions")?.optJSONObject(0)?.optJSONArray("options")
+                ?.optJSONObject(idx - 1)?.optString("label") ?: ""
+            if (label.contains("conversation", true) && !label.startsWith("Summarize", true) && rq.has("target_line")) {
+                cut = rq.getInt("target_line")
+            }
+        }
+        if (rq != null) questionCard?.done(toolUseId)
+        if (cut != null) {
+            optimisticCutFrom = cut
+            optimisticCutAt = System.currentTimeMillis()
+            db.deleteMessagesFrom(sessionId, cut)
+            loadCached()
+        }
         Thread {
             try {
                 RelayClient(this).answer(sessionId, toolUseId, answers, dismiss)
-                runOnUiThread { questionCard?.done(toolUseId) }
+                if (rq == null) runOnUiThread { questionCard?.done(toolUseId) }
             } catch (e: Exception) {
-                val gone = (e as? RelayException)?.code == 409
+                val code = (e as? RelayException)?.code
+                val gone = code == 409
                 runOnUiThread {
-                    if (gone) questionCard?.done(toolUseId) else questionCard?.failed()
-                    android.widget.Toast.makeText(
-                        this,
-                        if (gone) "Question is no longer pending" else "Couldn't send answer - try again",
-                        android.widget.Toast.LENGTH_SHORT
-                    ).show()
+                    if (rq != null) {
+                        // Roll back: the daemon didn't rewind, so the rows are
+                        // still live on its side -- the next poll re-fetches them.
+                        optimisticCutFrom = null
+                        questionCard?.undo(toolUseId)
+                        if (!gone) questionCard?.failed()
+                        android.widget.Toast.makeText(
+                            this,
+                            "Rewind failed: " + (e.message?.substringAfter("\"error\": \"")?.substringBefore("\"") ?: "try again"),
+                            android.widget.Toast.LENGTH_LONG
+                        ).show()
+                    } else {
+                        if (gone) questionCard?.done(toolUseId) else questionCard?.failed()
+                        android.widget.Toast.makeText(
+                            this,
+                            if (gone) "Question is no longer pending" else "Couldn't send answer - try again",
+                            android.widget.Toast.LENGTH_SHORT
+                        ).show()
+                    }
                 }
             }
         }.start()
@@ -1668,13 +1708,21 @@ class ChatActivity : Activity() {
                     val since = db.getMaxLine(sessionId)
                     val resp = client.stream(sessionId, since, if (firstPoll) 1 else 25)
                     firstPoll = false
-                    val msgs = RelayClient.parseMessages(resp)
+                    var msgs = RelayClient.parseMessages(resp)
+                    val dead = RelayClient.deadLines(resp)
+                    optimisticCutFrom?.let { cut ->
+                        if (dead.contains(cut) || System.currentTimeMillis() - optimisticCutAt > 60_000) {
+                            optimisticCutFrom = null  // daemon confirmed (or safety timeout)
+                        } else {
+                            msgs = msgs.filter { it.line < cut }
+                        }
+                    }
                     var changed = false
                     if (msgs.isNotEmpty()) {
                         db.insertMessages(sessionId, msgs)
                         changed = true
                     }
-                    if (db.deleteMessages(sessionId, RelayClient.deadLines(resp)) > 0) changed = true
+                    if (db.deleteMessages(sessionId, dead) > 0) changed = true
                     if (reconcileQueuedOutbox(client)) changed = true
                     if (reconcileDeliveredOutbox()) changed = true
                     // Independent of "changed" -- status can flip busy<->idle
@@ -1684,6 +1732,7 @@ class ChatActivity : Activity() {
                     val busy = resp.optString("status", "") == "busy"
                     val contextPct = if (resp.isNull("context_pct")) null else resp.optInt("context_pct", -1).takeIf { it >= 0 }
                     val question = resp.optJSONObject("question")
+                    if (question != null && question.optString("id").startsWith("rewind:")) rewindQuestion = question
                     runOnUiThread {
                         questionCard?.update(question)
                         thinkingRow?.visibility = if (busy) View.VISIBLE else View.GONE
