@@ -416,7 +416,8 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
         // (not an "outbox_<id>" one that hasn't landed yet).
         val line = m.id?.toIntOrNull()
         val options = mutableListOf("Copy message", "Read aloud from here")
-        if (line != null) options.add("Restore conversation to here")
+        // Claude Code only rewinds to your own prompts, so only offer it on those.
+        if (line != null && m.role == "user") options.add("Restore conversation to here")
         Theme.showMenu(context, anchor, options, tapX.toInt(), tapY.toInt()) { choice ->
             when (choice) {
                 "Restore conversation to here" -> if (line != null) activity.restoreConversationTo(line)
