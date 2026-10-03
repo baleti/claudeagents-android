@@ -139,16 +139,38 @@ object Markdown {
                     appendDim(textBuf, line, dimColor)
                     isProseLine = false
                 }
-                line.trimStart().startsWith("# ") -> {
+                headerRe.matches(line) -> {
                     flushProse()
-                    appendHeader(textBuf, line.trimStart().removePrefix("# "))
+                    val m = headerRe.matchEntire(line)!!
+                    appendHeader(textBuf, m.groupValues[1].length, m.groupValues[2].trim().trimEnd('#').trimEnd())
                     isProseLine = false
                 }
-                line.trimStart().startsWith("- ") || line.trimStart().startsWith("* ") -> {
+                hrRe.matches(line) -> {
                     flushProse()
-                    val indent = line.takeWhile { it == ' ' }
-                    textBuf.append(indent).append("• ")
-                    appendInline(textBuf, line.trimStart().removePrefix("- ").removePrefix("* "))
+                    val start = textBuf.length
+                    textBuf.append("\u2500".repeat(24))
+                    textBuf.setSpan(ForegroundColorSpan(dimColor), start, textBuf.length, 0)
+                    isProseLine = false
+                }
+                line.trimStart().startsWith(">") -> {
+                    flushProse()
+                    val start = textBuf.length
+                    textBuf.append("\u258E ")
+                    textBuf.setSpan(ForegroundColorSpan(dimColor), start, textBuf.length, 0)
+                    val bodyStart = textBuf.length
+                    appendInline(textBuf, line.trimStart().removePrefix(">").trimStart())
+                    textBuf.setSpan(StyleSpan(Typeface.ITALIC), bodyStart, textBuf.length, 0)
+                    isProseLine = false
+                }
+                bulletRe.matches(line) -> {
+                    flushProse()
+                    val m = bulletRe.matchEntire(line)!!
+                    var body = m.groupValues[2]
+                    var marker = "\u2022 "
+                    if (body.startsWith("[ ] ")) { marker = "\u2610 "; body = body.substring(4) }
+                    else if (body.startsWith("[x] ") || body.startsWith("[X] ")) { marker = "\u2611 "; body = body.substring(4) }
+                    textBuf.append(m.groupValues[1]).append(marker)
+                    appendInline(textBuf, body)
                     isProseLine = false
                 }
                 else -> {
@@ -177,11 +199,16 @@ object Markdown {
         return t.split("|").map { it.trim() }
     }
 
-    private fun appendHeader(out: SpannableStringBuilder, text: String) {
+    private val headerRe = Regex("^ {0,3}(#{1,6})\\s+(.*)$")
+    private val hrRe = Regex("^ {0,3}([-*_])( *\\1){2,} *$")
+    private val bulletRe = Regex("^( *)[-*+] +(.*)$")
+
+    private fun appendHeader(out: SpannableStringBuilder, level: Int, text: String) {
         val start = out.length
-        out.append(text)
+        appendInline(out, text)
         out.setSpan(StyleSpan(Typeface.BOLD), start, out.length, 0)
-        out.setSpan(RelativeSizeSpan(1.1f), start, out.length, 0)
+        val size = when (level) { 1 -> 1.4f; 2 -> 1.25f; 3 -> 1.12f; else -> 1.0f }
+        if (size != 1.0f) out.setSpan(RelativeSizeSpan(size), start, out.length, 0)
     }
 
     private fun appendDim(out: SpannableStringBuilder, text: String, dimColor: Int) {
@@ -219,12 +246,22 @@ object Markdown {
     private fun appendInline(out: SpannableStringBuilder, text: String) {
         var i = 0
         while (i < text.length) {
-            if (text.startsWith("**", i)) {
-                val end = text.indexOf("**", i + 2)
-                if (end >= 0) {
+            if (text.startsWith("**", i) || (text.startsWith("__", i) && (i == 0 || !text[i - 1].isLetterOrDigit()))) {
+                val marker = text.substring(i, i + 2)
+                val end = text.indexOf(marker, i + 2)
+                if (end > i + 2) {
                     val start = out.length
-                    out.append(text.substring(i + 2, end))
+                    appendInline(out, text.substring(i + 2, end))
                     out.setSpan(StyleSpan(Typeface.BOLD), start, out.length, 0)
+                    i = end + 2
+                    continue
+                }
+            } else if (text.startsWith("~~", i)) {
+                val end = text.indexOf("~~", i + 2)
+                if (end > i + 2) {
+                    val start = out.length
+                    appendInline(out, text.substring(i + 2, end))
+                    out.setSpan(android.text.style.StrikethroughSpan(), start, out.length, 0)
                     i = end + 2
                     continue
                 }
