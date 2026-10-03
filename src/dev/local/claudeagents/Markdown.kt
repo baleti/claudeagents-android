@@ -2,6 +2,11 @@ package dev.local.claudeagents
 
 import android.graphics.Typeface
 import android.text.SpannableStringBuilder
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.text.TextPaint
+import android.text.style.ClickableSpan
 import android.text.style.ForegroundColorSpan
 import android.text.style.RelativeSizeSpan
 import android.text.style.StyleSpan
@@ -200,6 +205,17 @@ object Markdown {
     // difference from prose (asked for explicitly: "don't change color of
     // code in messages, just apply syntax coloring" -- a tinted box read
     // as an unwanted color change).
+    private fun normalizeUrl(raw: String): String? {
+        if (raw.isEmpty() || raw.any { it.isWhitespace() }) return null
+        val lower = raw.lowercase()
+        return when {
+            lower.startsWith("http://") || lower.startsWith("https://") || lower.startsWith("mailto:") -> raw
+            Regex("^[a-z][a-z0-9+.-]*:").containsMatchIn(lower) -> null // other schemes: not opened
+            raw.startsWith("/") || raw.startsWith("#") -> null
+            else -> "https://$raw"
+        }
+    }
+
     private fun appendInline(out: SpannableStringBuilder, text: String) {
         var i = 0
         while (i < text.length) {
@@ -230,6 +246,22 @@ object Markdown {
                     i = end + 1
                     continue
                 }
+            } else if (text[i] == '[') {
+                // [label](url). Scheme-less targets (www.example.com,
+                // example.com/x) get https:// prepended.
+                val close = text.indexOf("](", i + 1)
+                val paren = if (close > 0) text.indexOf(')', close + 2) else -1
+                if (paren > 0) {
+                    val label = text.substring(i + 1, close)
+                    val url = normalizeUrl(text.substring(close + 2, paren).trim())
+                    if (label.isNotEmpty() && url != null) {
+                        val start = out.length
+                        out.append(label)
+                        out.setSpan(LinkSpan(url), start, out.length, 0)
+                        i = paren + 1
+                        continue
+                    }
+                }
             } else if (text[i] == '`') {
                 val end = text.indexOf('`', i + 1)
                 if (end >= 0) {
@@ -243,5 +275,20 @@ object Markdown {
             out.append(text[i])
             i++
         }
+    }
+}
+
+/** Markdown link. Opened from MessageAdapter's tap handler (the text is
+ *  selectable, so LinkMovementMethod can't be used), not via onClick. */
+class LinkSpan(val url: String) : ClickableSpan() {
+    override fun onClick(widget: android.view.View) = open(widget.context)
+    fun open(context: Context) {
+        try {
+            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+        } catch (_: Exception) {}
+    }
+    override fun updateDrawState(ds: TextPaint) {
+        ds.color = Theme.primary
+        ds.isUnderlineText = true
     }
 }

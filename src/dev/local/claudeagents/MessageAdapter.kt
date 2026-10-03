@@ -370,15 +370,19 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
             // 2026-09-12).
             var tapX = 0f
             var tapY = 0f
+            var tapView: View? = null
             val tapDetector = GestureDetector(context, object : GestureDetector.SimpleOnGestureListener() {
                 override fun onDown(e: MotionEvent) = true // required for onSingleTapConfirmed to ever fire
                 override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                    val link = (tapView as? TextView)?.let { linkAt(it, e.x, e.y) }
+                    if (link != null) { link.open(context); return true }
                     showMessageMenu(holder.bubble, tapX, tapY, m)
                     return true
                 }
             })
             val touchListener = View.OnTouchListener { v, event ->
                 if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+                    tapView = v
                     val vLoc = IntArray(2)
                     v.getLocationOnScreen(vLoc)
                     val bubbleLoc = IntArray(2)
@@ -641,6 +645,16 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
         } catch (e: Exception) {
             null
         }
+    }
+
+    private fun linkAt(tv: TextView, x: Float, y: Float): LinkSpan? {
+        val text = tv.text as? android.text.Spanned ?: return null
+        val layout = tv.layout ?: return null
+        val px = x - tv.totalPaddingLeft + tv.scrollX
+        val py = y - tv.totalPaddingTop + tv.scrollY
+        if (py < 0 || py > layout.height) return null
+        val off = layout.getOffsetForHorizontal(layout.getLineForVertical(py.toInt()), px)
+        return text.getSpans(off, off, LinkSpan::class.java).firstOrNull()
     }
 
     private fun plainTextView(content: CharSequence, maxWidth: Int): TextView {
