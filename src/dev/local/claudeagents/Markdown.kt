@@ -250,7 +250,19 @@ object Markdown {
                 // [label](url). Scheme-less targets (www.example.com,
                 // example.com/x) get https:// prepended.
                 val close = text.indexOf("](", i + 1)
-                val paren = if (close > 0) text.indexOf(')', close + 2) else -1
+                // Balanced scan: URLs may contain parens, e.g. "...(V4)%2011.pdf".
+                var paren = -1
+                if (close > 0) {
+                    var depth = 1
+                    var j = close + 2
+                    while (j < text.length) {
+                        val c = text[j]
+                        if (c == '(') depth++
+                        else if (c == ')' && --depth == 0) { paren = j; break }
+                        else if (c.isWhitespace()) break
+                        j++
+                    }
+                }
                 if (paren > 0) {
                     val label = text.substring(i + 1, close)
                     val url = normalizeUrl(text.substring(close + 2, paren).trim())
