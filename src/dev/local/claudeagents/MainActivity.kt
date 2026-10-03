@@ -459,6 +459,15 @@ class MainActivity : Activity() {
                         Toast.makeText(this, "Spawn failed: no session id returned", Toast.LENGTH_LONG).show()
                         return@runOnUiThread
                     }
+                    // Seed the local list right now from the spawn response
+                    // so the row is already there when this screen is
+                    // returned to, not after a full sync round.
+                    resp.optJSONObject("conversation")?.let {
+                        try {
+                            RelayClient.parseConversations(org.json.JSONArray().put(it)).forEach { c -> db.upsertConversation(c) }
+                        } catch (e: Exception) {
+                        }
+                    }
                     SyncJobService.scheduleImmediate(this)
                     val intent = Intent(this, ChatActivity::class.java)
                     intent.putExtra("session_id", sessionId)
