@@ -1510,7 +1510,7 @@ class ChatActivity : Activity() {
             .map { row ->
                 val status = when {
                     row.state == "pending" -> "sending…"
-                    row.serverState == "queued" -> "queued on server — will send once the session is live"
+                    row.serverState == "queued" -> "queued on host3 — couldn't restart the session, will send when it is live"
                     row.serverState == "delivered" && !stillLive ->
                         "sent — the session ended before a reply could sync back"
                     row.serverState == "delivered" -> "sent — waiting for response"
@@ -1528,7 +1528,7 @@ class ChatActivity : Activity() {
             .map { row ->
                 val status = when {
                     row.state == "pending" -> "uploading…"
-                    row.serverState == "queued" -> "queued on server — will send once the session is live"
+                    row.serverState == "queued" -> "queued on host3 — couldn't restart the session, will send when it is live"
                     row.serverState == "delivered" -> "sent"
                     else -> "uploading…"
                 }
