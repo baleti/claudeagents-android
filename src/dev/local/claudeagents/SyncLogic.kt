@@ -32,17 +32,30 @@ object SyncLogic {
     // rather than redoing the work.
     private val syncing = java.util.concurrent.atomic.AtomicBoolean(false)
 
+    private val rerunRequested = java.util.concurrent.atomic.AtomicBoolean(false)
+
     fun performSync(context: Context): Boolean {
         if (!TokenStore.isPaired(context)) {
             Log.w(TAG, "sync: not paired, skipping")
             return false
         }
         if (!syncing.compareAndSet(false, true)) {
-            Log.i(TAG, "sync: already in progress, coalescing this trigger")
+            // Reported live 2026-10-03: a brand-new conversation didn't
+            // appear on return to the list. The in-flight round had
+            // already fetched its server list before the session existed,
+            // so a plain coalesce reported "done" from that stale
+            // snapshot and nothing re-checked. Flag a trailing round so
+            // whatever triggered this call is actually seen.
+            rerunRequested.set(true)
+            Log.i(TAG, "sync: already in progress, queued a trailing round")
             return true
         }
         try {
-            return performSyncLocked(context)
+            var result = performSyncLocked(context)
+            while (rerunRequested.compareAndSet(true, false)) {
+                result = performSyncLocked(context)
+            }
+            return result
         } finally {
             syncing.set(false)
         }

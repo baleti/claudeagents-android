@@ -1030,7 +1030,12 @@ def spawn_session(dir_key, initial_text):
     # booting or mid-first-response.
     deadline = time.time() + 15
     while time.time() < deadline:
-        if PROJECTS_DIR_glob_by_id(session_id):
+        path = PROJECTS_DIR_glob_by_id(session_id)
+        # The file appears with only metadata lines first, and
+        # list_conversations() hides a transcript with no user/assistant
+        # line yet -- wait for a real message so the phone's very next
+        # list sync includes this session.
+        if path and scan_transcript_stats(path)[3] > 0:
             return session_id, None
         time.sleep(0.5)
     log(f"spawn: transcript for {session_id} never appeared within 15s")
