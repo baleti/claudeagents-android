@@ -69,6 +69,8 @@ class ChatActivity : Activity() {
     private lateinit var drawer: SwipeDrawer
     private lateinit var swipeNav: SwipeNavFrame
     private lateinit var synthBanner: SynthesizingBanner
+    private lateinit var voiceIndicator: VoiceIndicator
+    private var voiceBegun = false
     private lateinit var drawerListView: ListView
     private lateinit var drawerAdapter: ConversationAdapter
     // Same search box/DSL filtering as MainActivity's conversation list
@@ -244,6 +246,8 @@ class ChatActivity : Activity() {
         contextBannerView = contextBanner
         contextBannerLabel = contextLabel
 
+        voiceIndicator = VoiceIndicator(this) { if (TtsSettings.getTtsEngine(this) == "chatterbox") "Chatterbox" else "Kokoro" }
+        root.addView(voiceIndicator.view)
         synthBanner = SynthesizingBanner(this)
         root.addView(synthBanner.view)
 
@@ -308,6 +312,8 @@ class ChatActivity : Activity() {
                     playerBar.hide()
                     adapter.setHighlight(null, null)
                     synthBanner.stop()
+                    voiceBegun = false
+                    voiceIndicator.end()
                 }
             },
             onPlayingChanged = { playing -> playerBar.setPlaying(playing) },
@@ -329,8 +335,11 @@ class ChatActivity : Activity() {
             },
             onGenerating = { generating, estimatedMs ->
                 if (generating) synthBanner.start(estimatedMs) else synthBanner.stop()
+                // First "waiting for audio" of a read = the start of this read.
+                if (generating && !voiceBegun) { voiceBegun = true; voiceIndicator.begin(estimatedMs) }
             },
-            onStatus = { message, sentence, of -> synthBanner.addStatus(message, sentence, of) },
+            onVoiceSource = { local -> voiceIndicator.onSentenceSource(local) },
+            onStatus = { message, sentence, of -> synthBanner.addStatus(message, sentence, of); voiceIndicator.onStep(message) },
         )
         playerBar = PlayerControlBar(
             context = this,

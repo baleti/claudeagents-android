@@ -45,6 +45,9 @@ class ReadAloudController(
     private val onPlayingChanged: (playing: Boolean) -> Unit = {},
     // The server's step-by-step `status` events - see SynthesizingBanner.addStatus.
     private val onStatus: (message: String, sentence: Int, of: Int) -> Unit = { _, _, _ -> },
+    // Fires when a sentence starts playing: true = spoken by the phone's own
+    // TTS (the bridge), false = by the server's engine. See VoiceIndicator.
+    private val onVoiceSource: (local: Boolean) -> Unit = {},
     // Fires when playback moves into a different section (including the
     // very first one) -- the index into the `sections` list passed to
     // start(). Lets a caller map "what's playing now" back to its own
@@ -174,9 +177,15 @@ class ReadAloudController(
 
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    // Texts of sentences the phone's own TTS spoke - how onSentenceStart tells
+    // a local sentence from a server one.
+    private val localSpoken = java.util.Collections.synchronizedSet(HashSet<String>())
+
     private val playbackListener = object : TtsPlaybackService.HighlightListener {
         override fun onSentenceStart(text: String, words: List<WordTiming>, startMs: Long) {
+            val local = localSpoken.contains(text)
             mainHandler.post {
+                onVoiceSource(local)
                 onGenerating(false, 0L)
                 val sectionText = sections.getOrNull(currentSectionIndex) ?: return@post
                 var idx = sectionText.indexOf(text, searchCursor)
@@ -313,6 +322,7 @@ class ReadAloudController(
      * pressed play". */
     fun start(title: String, sections: List<String>, live: Boolean = false, conversationId: String? = null) {
         stop()
+        localSpoken.clear()
         this.sections = sections
         this.liveMode = live
         this.stalledAtEnd = false
@@ -630,6 +640,7 @@ class ReadAloudController(
                     if (audio == null || sr <= 0 || audio.isEmpty()) return@Thread
                     synchronized(feedLock) {
                         if (!isCurrent() || serverTookOver) return@Thread
+                        localSpoken.add(sentence)
                         svc.enqueueSentence(sentence, estimateWordTimings(sentence, audio.size.toLong() / 2 * 1000 / sr), audio, sr)
                         localEnd = range.last + 1
                     }
