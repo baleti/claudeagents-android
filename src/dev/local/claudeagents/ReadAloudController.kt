@@ -604,7 +604,7 @@ class ReadAloudController(
         var serverTookOver = false
         var localEnd = 0
         var serverCursor = 0
-        val bridge = if (idx == 0 && session.live && localBridge.isReady()) localBridge else null
+        val bridge = if (idx == 0 && localBridge.isReady()) localBridge else null
         val localSentences = if (bridge != null) splitLocalSentences(text) else emptyList()
         val wsOffset = localSentences.firstOrNull()?.last?.plus(1) ?: 0
         serverCursor = wsOffset
