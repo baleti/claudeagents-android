@@ -609,6 +609,7 @@ class TtsPlaybackService : Service() {
             highlightAnchorAtNanos = System.nanoTime()
             val highlighter = object : Runnable {
                 var idx = 0
+                var lastFired = -1 // only notify when the word actually changes - re-firing the same word every tick made callers re-render for nothing (flicker)
                 override fun run() {
                     if (stopRequested || seekGeneration != myGeneration) return
                     // The write loop below stalls on `!playing` and simply
@@ -639,7 +640,10 @@ class TtsPlaybackService : Service() {
                         ((System.nanoTime() - highlightAnchorAtNanos) / 1_000_000.0 * playbackSpeed).toLong()
                     while (idx < current.words.size && elapsedMs >= current.words[idx].endMs) idx++
                     if (idx < current.words.size) {
-                        listeners.forEach { it.onWordHighlight(idx) }
+                        if (idx != lastFired) {
+                            lastFired = idx
+                            listeners.forEach { it.onWordHighlight(idx) }
+                        }
                         mainHandler.postDelayed(this, HIGHLIGHT_TICK_MS)
                     }
                 }

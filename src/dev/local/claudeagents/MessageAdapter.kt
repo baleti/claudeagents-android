@@ -72,8 +72,21 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
      * rendering changed its text can't safely have m.text's offsets
      * applied to whatever's really on screen, so those are left alone
      * exactly as getView() last rendered them. */
+    // The one highlight span, moved in place inside the row's own Spannable
+    // text. Re-setting the whole message text on every tick (the old
+    // approach) forced a full measure/layout each time and read as flicker;
+    // moving a BackgroundColorSpan (UpdateAppearance) only invalidates.
+    private var spanHost: android.text.Spannable? = null
+    private var spanObj: BackgroundColorSpan? = null
+
+    private fun clearSpan() {
+        spanObj?.let { spanHost?.removeSpan(it) }
+        spanObj = null
+    }
+
     private fun renderRowHighlight(lv: ListView, rowId: String?, range: IntRange?) {
         if (rowId == null) return
+        if (range == null) { clearSpan(); return }
         val pos = items.indexOfFirst { it.id == rowId }
         if (pos < 0) return
         val m = items[pos]
@@ -82,7 +95,23 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
         if (childIdx !in 0 until lv.childCount) return
         val holder = lv.getChildAt(childIdx)?.tag as? Holder ?: return
         val tv = holder.body.getChildAt(0) as? TextView ?: return
-        tv.text = withHighlight(base, range)
+        var host = tv.text as? android.text.Spannable
+        if (host == null || host !== spanHost) {
+            // First tick for this row's TextView (or it was rebound since):
+            // one setText, then every later tick just moves the span.
+            clearSpan()
+            tv.setText(base, TextView.BufferType.SPANNABLE)
+            host = tv.text as android.text.Spannable
+            spanHost = host
+        }
+        val start = range.first.coerceIn(0, host.length)
+        val end = (range.last + 1).coerceIn(start, host.length)
+        clearSpan()
+        if (start < end) {
+            val sp = BackgroundColorSpan(0x552196F3)
+            host.setSpan(sp, start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            spanObj = sp
+        }
     }
 
     // The exact text a row's TextView shows when NOT highlighted, only for
