@@ -624,7 +624,7 @@ class ReadAloudController(
                     val latch = java.util.concurrent.CountDownLatch(1)
                     var pcm: ByteArray? = null
                     var sr = 0
-                    bridge.synthesize(sentence) { p, r -> pcm = p; sr = r; latch.countDown() }
+                    bridge.synthesize(speakableForLocalTts(sentence)) { p, r -> pcm = p; sr = r; latch.countDown() }
                     if (!latch.await(4, java.util.concurrent.TimeUnit.SECONDS)) return@Thread
                     val audio = pcm
                     if (audio == null || sr <= 0 || audio.isEmpty()) return@Thread

@@ -199,7 +199,7 @@ object Markdown {
         return t.split("|").map { it.trim() }
     }
 
-    private val headerRe = Regex("^ {0,3}(#{1,6})\\s+(.*)$")
+    private val headerRe = Regex("^ {0,3}(#{2,6}|#(?=\\s))\\s*(.*)$") // "##Heading" with no space counts too (but "#tag" does not)
     private val hrRe = Regex("^ {0,3}([-*_])( *\\1){2,} *$")
     private val bulletRe = Regex("^( *)[-*+] +(.*)$")
 
