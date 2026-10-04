@@ -38,6 +38,32 @@ import java.util.UUID
 class LocalTtsBridge(private val context: Context) {
     private var tts: TextToSpeech? = null
     @Volatile private var ready = false
+    // Engine init finished but unusable (no engine / no installed voice) -
+    // lets callers stop waiting for readiness that will never come.
+    @Volatile private var failed = false
+
+    companion object {
+        @Volatile private var instance: LocalTtsBridge? = null
+
+        /** One bridge per process, kept warm across conversations: engine
+         * init takes ~2.7s, and a per-screen instance meant opening a chat
+         * and tapping Read aloud within a few seconds found it not ready
+         * yet, so the read silently went without the local bridge. */
+        fun shared(context: Context): LocalTtsBridge =
+            instance ?: synchronized(this) {
+                instance ?: LocalTtsBridge(context.applicationContext).also { instance = it }
+            }
+    }
+
+    /** Ready now, or still initialising and likely to be soon. */
+    fun isUsable(): Boolean = ready || (tts != null && !failed)
+
+    /** Blocks (call off the main thread) until ready, init failed, or the timeout passes. */
+    fun awaitReady(timeoutMs: Long): Boolean {
+        val deadline = System.nanoTime() + timeoutMs * 1_000_000
+        while (!ready && !failed && System.nanoTime() < deadline) Thread.sleep(50)
+        return ready
+    }
 
     /** Call well before synthesize() is ever likely to be needed - engine
      * init alone measured ~2.7s the first time an app process asks for it
@@ -52,8 +78,8 @@ class LocalTtsBridge(private val context: Context) {
                 if (voice != null) {
                     engine.voice = voice
                     ready = true
-                }
-            }
+                } else failed = true
+            } else failed = true
         }, "com.google.android.tts")
     }
 

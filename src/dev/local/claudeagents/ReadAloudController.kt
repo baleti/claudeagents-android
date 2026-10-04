@@ -74,7 +74,7 @@ class ReadAloudController(
     private var ttsService: TtsPlaybackService? = null
     private var bound = false
     private var ws: WebSocketClient? = null
-    private val localBridge = LocalTtsBridge(context)
+    private val localBridge = LocalTtsBridge.shared(context)
     // The exact text the bridge already spoke for section 0's first
     // sentence, if any - set right before kicking off that section's real
     // stream, cleared (whether it matched or not) the moment that stream's
@@ -287,7 +287,6 @@ class ReadAloudController(
             try { context.unbindService(connection) } catch (_: Exception) {}
             bound = false
         }
-        localBridge.shutdown()
     }
 
     fun isActive(): Boolean = active
@@ -604,14 +603,19 @@ class ReadAloudController(
         var serverTookOver = false
         var localEnd = 0
         var serverCursor = 0
-        val bridge = if (idx == 0 && localBridge.isReady()) localBridge else null
+        val bridge = if (idx == 0 && localBridge.isUsable()) localBridge else null
         val localSentences = if (bridge != null) splitLocalSentences(text) else emptyList()
-        val wsOffset = localSentences.firstOrNull()?.last?.plus(1) ?: 0
+        // If the engine is ready the server skips the sentence local speaks
+        // first; if it is still warming up the server gets the whole text
+        // (and any of its sentences local already covered are dropped).
+        val readyNow = bridge?.isReady() == true
+        val wsOffset = if (readyNow) (localSentences.firstOrNull()?.last?.plus(1) ?: 0) else 0
         serverCursor = wsOffset
         val sectionFinished = java.util.concurrent.atomic.AtomicBoolean(false)
 
         if (bridge != null && localSentences.isNotEmpty()) {
             Thread {
+                if (!readyNow && !bridge.awaitReady(4000)) return@Thread
                 for ((i, range) in localSentences.withIndex()) {
                     if (!isCurrent() || serverTookOver) return@Thread
                     while (i > 0 && isCurrent() && !serverTookOver && svc.bufferedAheadMs() > 700) Thread.sleep(100)

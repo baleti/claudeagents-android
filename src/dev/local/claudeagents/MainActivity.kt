@@ -158,6 +158,9 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Warm the on-device TTS engine now (init takes ~2.7s) so Read Aloud in a
+        // conversation opened moments later already has the local bridge ready.
+        LocalTtsBridge.shared(this).warmUp()
         db = Db.getInstance(this)
         root = LinearLayout(this)
         root.orientation = LinearLayout.VERTICAL
