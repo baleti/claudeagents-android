@@ -43,6 +43,8 @@ class ReadAloudController(
     // in-app controls, the system notification's own button, a seek,
     // audio-focus loss/gain.
     private val onPlayingChanged: (playing: Boolean) -> Unit = {},
+    // The server's step-by-step `status` events - see SynthesizingBanner.addStatus.
+    private val onStatus: (message: String, sentence: Int, of: Int) -> Unit = { _, _, _ -> },
     // Fires when playback moves into a different section (including the
     // very first one) -- the index into the `sections` list passed to
     // start(). Lets a caller map "what's playing now" back to its own
@@ -78,7 +80,6 @@ class ReadAloudController(
     // stream, cleared (whether it matched or not) the moment that stream's
     // own first sentence event arrives. See openConnection's onBinary for
     // the actual skip-if-matches logic.
-    @Volatile private var pendingBridgeText: String? = null
     @Volatile private var active = false
     @Volatile private var currentSpeed = 1.0f
     // Bumped only on a genuine abandon-everything event - start()/stop()/
@@ -209,7 +210,7 @@ class ReadAloudController(
         }
 
         override fun onSentenceEnd() {
-            mainHandler.post { onGenerating(true, avgSynthMs) }
+            mainHandler.post { if (active) onGenerating(true, avgSynthMs) }
         }
 
         override fun onPlayingChanged(playing: Boolean) {
@@ -355,61 +356,22 @@ class ReadAloudController(
         svc.setEstimatedDuration((wordCount / (160.0 / 60.0) * 1000).toLong())
         svc.setPlaybackSpeed(currentSpeed)
         streamCurrentSection(svc)
-
-        // Instant on-device bridge for the very first sentence only -
-        // Chatterbox's cold-load otherwise means real dead silence at the
-        // start of a fresh read (see LocalTtsBridge's own doc). Fires
-        // concurrently with the real stream just kicked off above; whoever
-        // actually needs it, the openConnection() onBinary handler below
-        // skips the real server's matching first sentence once this has
-        // already spoken it, rather than saying the same thing twice.
-        Log.i("ReadAloudController", "bridge check: engine=${TtsSettings.getTtsEngine(context)} bridgeReady=${localBridge.isReady()}")
-        if (TtsSettings.getTtsEngine(context) == "chatterbox" && localBridge.isReady()) {
-            val guess = firstSentenceGuess(sections.getOrNull(0) ?: "")
-            if (guess.isNotEmpty()) {
-                pendingBridgeText = guess
-                val t0 = System.nanoTime()
-                localBridge.synthesize(guess) { pcm, sr ->
-                    if (pcm == null || sr <= 0 || pcm.isEmpty()) {
-                        Log.i("ReadAloudController", "bridge synth failed/empty for ${guess.length} chars")
-                        return@synthesize
-                    }
-                    mainHandler.post {
-                        val ms = (System.nanoTime() - t0) / 1_000_000
-                        // Only still useful if nothing has superseded this
-                        // exact session/guess in the meantime (a fresh
-                        // start(), a skip, or - rarely - the real server
-                        // response winning the race and already clearing
-                        // pendingBridgeText itself).
-                        if (myServiceSessionGeneration != svc.currentSessionGeneration()) {
-                            Log.i("ReadAloudController", "bridge result ready in ${ms}ms but session moved on")
-                            return@post
-                        }
-                        if (pendingBridgeText != guess) {
-                            Log.i("ReadAloudController", "bridge result ready in ${ms}ms but real server already won")
-                            return@post
-                        }
-                        Log.i("ReadAloudController", "bridge enqueued first sentence in ${ms}ms: ${guess.take(60)}")
-                        val durationMs = (pcm.size / 2).toLong() * 1000 / sr
-                        svc.enqueueSentence(guess, estimateWordTimings(guess, durationMs), pcm, sr)
-                    }
-                }
-            }
-        }
     }
 
-    /** A short, cheap client-side guess at "the first sentence" of a
-     * section's text - doesn't need to exactly match the server's own
-     * split_sentences() (see openConnection's onBinary skip-check, which
-     * degrades gracefully to a little redundancy rather than breaking
-     * anything if the guess and the server's actual first sentence
-     * disagree), just needs to be short enough to speak near-instantly. */
-    private fun firstSentenceGuess(text: String): String {
-        val trimmed = text.trim()
-        if (trimmed.isEmpty()) return trimmed
-        val boundary = Regex("[.!?](?:\\s|$)").find(trimmed)
-        val cut = boundary?.range?.last?.plus(1) ?: trimmed.length
-        return trimmed.substring(0, minOf(cut, trimmed.length, 220)).trim()
+    /** Sentence char ranges within `text`, split like server.py's
+     * split_sentences (sentence-ending punctuation + whitespace, blank
+     * lines) so local and server agree where sentences begin. */
+    private fun splitLocalSentences(text: String): List<IntRange> {
+        val out = mutableListOf<IntRange>()
+        var start = -1
+        for (i in text.indices) {
+            if (start < 0 && !text[i].isWhitespace()) start = i
+            val boundary = start >= 0 && text[i].isWhitespace() && i > 0 &&
+                (text[i - 1] in ".!?" || (text[i] == '\n' && i + 1 < text.length && text[i + 1] == '\n'))
+            if (boundary) { out.add(start..(i - 1)); start = -1 }
+        }
+        if (start >= 0) out.add(start..text.trimEnd().length - 1)
+        return out.filter { it.last >= it.first }
     }
 
     /** Evenly-spaced word timing guess for bridge audio, whose real timing
@@ -628,13 +590,62 @@ class ReadAloudController(
         session.ws = client
         if (session.live) ws = client
 
+        // --- Local-TTS bridge (section 0 only) --------------------------
+        // Chatterbox can take 15-30s to produce its first sentence (cold
+        // load, GPU model eviction). The phone's own TTS speaks the first
+        // sentence at once and the server is asked to start AFTER it; if
+        // the server is still behind when local audio runs low, local
+        // speaks the next sentence too, and so on. The moment a server
+        // sentence lands past what local covered, local stops for good
+        // (feedLock keeps the two producers in order); server sentences
+        // for text local already covered are dropped. Mirrors
+        // newsdigest-android's ReadAloudController.streamText().
+        val feedLock = Any()
+        var serverTookOver = false
+        var localEnd = 0
+        var serverCursor = 0
+        val bridge = if (idx == 0 && session.live && localBridge.isReady()) localBridge else null
+        val localSentences = if (bridge != null) splitLocalSentences(text) else emptyList()
+        val wsOffset = localSentences.firstOrNull()?.last?.plus(1) ?: 0
+        serverCursor = wsOffset
+        val sectionFinished = java.util.concurrent.atomic.AtomicBoolean(false)
+
+        if (bridge != null && localSentences.isNotEmpty()) {
+            Thread {
+                for ((i, range) in localSentences.withIndex()) {
+                    if (!isCurrent() || serverTookOver) return@Thread
+                    while (i > 0 && isCurrent() && !serverTookOver && svc.bufferedAheadMs() > 700) Thread.sleep(100)
+                    if (!isCurrent() || serverTookOver) return@Thread
+                    val sentence = text.substring(range)
+                    val latch = java.util.concurrent.CountDownLatch(1)
+                    var pcm: ByteArray? = null
+                    var sr = 0
+                    bridge.synthesize(sentence) { p, r -> pcm = p; sr = r; latch.countDown() }
+                    if (!latch.await(4, java.util.concurrent.TimeUnit.SECONDS)) return@Thread
+                    val audio = pcm
+                    if (audio == null || sr <= 0 || audio.isEmpty()) return@Thread
+                    synchronized(feedLock) {
+                        if (!isCurrent() || serverTookOver) return@Thread
+                        svc.enqueueSentence(sentence, estimateWordTimings(sentence, audio.size.toLong() / 2 * 1000 / sr), audio, sr)
+                        localEnd = range.last + 1
+                    }
+                }
+                // Local covered the whole section (server dead or hopelessly slow).
+                val finish = synchronized(feedLock) { isCurrent() && !serverTookOver && sectionFinished.compareAndSet(false, true) }
+                if (finish) {
+                    synchronized(session) { session.done = true }
+                    mainHandler.post { if (isCurrent()) handleSectionDone(svc, session) }
+                }
+            }.apply { isDaemon = true; name = "ReadAloudLocalTts"; start() }
+        }
+
         Thread {
             client.connect(object : WebSocketClient.Listener {
                 private var pendingMeta: JSONObject? = null
 
                 override fun onOpen() {
                     client.sendText(JSONObject().apply {
-                        put("text", text)
+                        put("text", text.substring(wsOffset).trimStart())
                         put("engine", TtsSettings.getTtsEngine(context))
                         TtsSettings.getTtsVoice(context)?.let { put("voice", it) }
                     }.toString())
@@ -652,7 +663,13 @@ class ReadAloudController(
                     val obj = JSONObject(msg)
                     when (obj.optString("type")) {
                         "sentence" -> pendingMeta = obj
+                        "status" -> {
+                            val m = obj.optString("message")
+                            val k = obj.optInt("sentence"); val n = obj.optInt("of")
+                            mainHandler.post { onStatus(m, k, n) }
+                        }
                         "done" -> {
+                            if (localSentences.isNotEmpty() && !sectionFinished.compareAndSet(false, true)) return
                             val wasLive = synchronized(session) {
                                 session.done = true
                                 session.live
@@ -661,6 +678,7 @@ class ReadAloudController(
                         }
                         "error" -> {
                             Log.e("ReadAloudController", "server error: ${obj.optString("message")}")
+                            if (localSentences.isNotEmpty() && !serverTookOver) return // local TTS keeps reading
                             svc.endSession()
                             mainHandler.post {
                                 if (active) {
@@ -686,18 +704,15 @@ class ReadAloudController(
                     recordSynthMs(meta.optLong("synth_ms", -1))
                     val sentenceText = meta.getString("text")
 
-                    // The on-device bridge (see start()'s own doc) may have
-                    // already spoken section 0's first sentence before this
-                    // real one even arrived - checked/cleared exactly once,
-                    // on the first sentence event THIS connection ever
-                    // delivers, so it can never accidentally suppress a
-                    // LATER sentence that happens to share the same text.
-                    if (idx == 0) {
-                        val bridged = pendingBridgeText
-                        pendingBridgeText = null
-                        if (bridged != null && bridged.trim().equals(sentenceText.trim(), ignoreCase = true)) {
-                            Log.i("ReadAloudController", "real server's first sentence matched the bridge - skipping duplicate audio")
-                            return
+                    // Local bridge may already have spoken this sentence:
+                    // drop the server's copy; otherwise the server has
+                    // caught up, so local stops for good.
+                    if (localSentences.isNotEmpty()) {
+                        synchronized(feedLock) {
+                            val at = text.indexOf(sentenceText, serverCursor)
+                            if (at >= 0) serverCursor = at + sentenceText.length
+                            if (at >= 0 && at + sentenceText.length <= localEnd) return
+                            serverTookOver = true
                         }
                     }
 
@@ -711,6 +726,7 @@ class ReadAloudController(
                 override fun onFailure(error: Throwable) {
                     if (!isCurrent()) return // expected: abandonSessions()'s close() surfaces as a failure on the abandoned connection
                     Log.e("ReadAloudController", "websocket failed", error)
+                    if (localSentences.isNotEmpty() && !serverTookOver) return // local TTS keeps reading
                     mainHandler.post {
                         active = false
                         onStateChanged.invoke(false)
@@ -725,7 +741,6 @@ class ReadAloudController(
         liveMode = false
         stalledAtEnd = false
         onGenerating(false, 0L)
-        pendingBridgeText = null // a still-in-flight bridge synthesis' callback checks this too, but no need to wait for it
         abandonSessions()
         ttsService?.stopAll()
         // Explicit, synchronous notification - stopAll()'s own async

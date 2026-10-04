@@ -330,6 +330,7 @@ class ChatActivity : Activity() {
             onGenerating = { generating, estimatedMs ->
                 if (generating) synthBanner.start(estimatedMs) else synthBanner.stop()
             },
+            onStatus = { message, sentence, of -> synthBanner.addStatus(message, sentence, of) },
         )
         playerBar = PlayerControlBar(
             context = this,
