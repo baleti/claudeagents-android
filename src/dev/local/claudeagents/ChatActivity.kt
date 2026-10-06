@@ -408,6 +408,13 @@ class ChatActivity : Activity() {
             input.setText(savedDraft)
             input.setSelection(input.text.length)
         }
+        if (intent.getBooleanExtra("focus_input", false)) {
+            input.post {
+                input.requestFocus()
+                (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager)
+                    .showSoftInput(input, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+            }
+        }
         val inputParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         inputParams.marginEnd = dp(8)
         inputRow.addView(input, inputParams)

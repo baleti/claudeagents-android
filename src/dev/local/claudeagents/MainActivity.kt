@@ -444,6 +444,32 @@ class MainActivity : Activity() {
         dialog.show()
     }
 
+    // "+" starts an empty session and opens its chat with the input
+    // focused -- no modal (it vanished when switching activities; typed
+    // text now lives in ChatActivity's persistent DraftStore instead).
+    // Account is picked from a small popup on the button first.
+    private fun spawnEmptySession(account: String) {
+        Toast.makeText(this, "Starting session…", Toast.LENGTH_SHORT).show()
+        Thread {
+            try {
+                val sessionId = RelayClient(this).spawn(account, "").optString("session_id", "")
+                runOnUiThread {
+                    if (sessionId.isEmpty()) {
+                        Toast.makeText(this, "Spawn failed: no session id returned", Toast.LENGTH_LONG).show()
+                        return@runOnUiThread
+                    }
+                    val intent = Intent(this, ChatActivity::class.java)
+                    intent.putExtra("session_id", sessionId)
+                    intent.putExtra("title", "New conversation")
+                    intent.putExtra("focus_input", true)
+                    startActivity(intent)
+                }
+            } catch (e: Exception) {
+                runOnUiThread { Toast.makeText(this, "Spawn failed: ${e.message}", Toast.LENGTH_LONG).show() }
+            }
+        }.start()
+    }
+
     // Same primitive as the daemon's other launch points: tmux new-session
     // + claude --session-id under the chosen account's CLAUDE_CONFIG_DIR
     // (claude-agents-daemon.py's spawn_session / POST /api/v1/spawn).
@@ -564,7 +590,11 @@ class MainActivity : Activity() {
         val newButtonParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         newButtonParams.marginStart = dp(8)
         newButtonParams.gravity = Gravity.CENTER_VERTICAL
-        newButton.setOnClickListener { showNewSessionDialog() }
+        newButton.setOnClickListener {
+            Theme.showMenu(this, newButton, listOf("claude1", "claude2", "claude3"), hPadDp = 10, alignEnd = true) { picked ->
+                spawnEmptySession(when (picked) { "claude1" -> "claude"; else -> picked })
+            }
+        }
         searchRow.addView(newButton, newButtonParams)
 
         // No visible ActionBar anywhere in this app (every screen hides it

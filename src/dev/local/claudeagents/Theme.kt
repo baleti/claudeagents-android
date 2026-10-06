@@ -109,7 +109,7 @@ object Theme {
     // message"). Null (every other caller -- overflow menus with no
     // specific tap point) keeps the original anchor-edge behavior
     // unchanged.
-    fun showMenu(context: Context, anchor: View, items: List<String>, tapX: Int? = null, tapY: Int? = null, onSelect: (String) -> Unit) {
+    fun showMenu(context: Context, anchor: View, items: List<String>, tapX: Int? = null, tapY: Int? = null, hPadDp: Int = 20, alignEnd: Boolean = false, onSelect: (String) -> Unit) {
         val container = LinearLayout(context)
         container.orientation = LinearLayout.VERTICAL
         container.background = roundedDrawable(popupSurface, context, radiusDp = 12, strokeColor = primary)
@@ -135,7 +135,7 @@ object Theme {
             row.setTypeface(null, Typeface.BOLD)
             row.gravity = Gravity.CENTER_VERTICAL
             row.setTextColor(primary)
-            row.setPadding(dp(context, 20), dp(context, 14), dp(context, 20), dp(context, 14))
+            row.setPadding(dp(context, hPadDp), dp(context, 14), dp(context, hPadDp), dp(context, 14))
             row.background = rippleOn(roundedDrawable(Color.TRANSPARENT, context, radiusDp = 0))
             row.isClickable = true
             row.setOnClickListener {
@@ -160,6 +160,8 @@ object Theme {
         container.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
         val popupHeight = container.measuredHeight
         val popupWidth = container.measuredWidth
+        // Pin the window to the measured content width so it never stretches wider than its text.
+        popup.width = popupWidth
         val anchorLoc = IntArray(2)
         anchor.getLocationOnScreen(anchorLoc)
         val visibleFrame = Rect()
@@ -189,6 +191,8 @@ object Theme {
 
         val spaceBelow = visibleFrame.bottom - (anchorLoc[1] + anchor.height)
         val yOffset = if (popupHeight > spaceBelow) -(anchor.height + popupHeight) else 0
-        popup.showAsDropDown(anchor, 0, yOffset)
+        // alignEnd: popup's right edge flush with the anchor's right edge.
+        val xOffset = if (alignEnd) (anchor.width - popupWidth).coerceAtLeast(visibleFrame.left - anchorLoc[0]) else 0
+        popup.showAsDropDown(anchor, xOffset, yOffset)
     }
 }
