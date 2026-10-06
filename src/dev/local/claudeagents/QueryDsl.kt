@@ -125,7 +125,7 @@ object QueryDsl {
         "rv" to "rv", "reverse" to "rv"
     )
 
-    private data class Token(val raw: String, val isQuoted: Boolean, val spanStart: Int, val unterminated: Boolean = false)
+    private data class Token(val raw: String, val isQuoted: Boolean, val spanStart: Int, val unterminated: Boolean = false, val neg: Boolean = false)
 
     // "..." is checked first at every position -- a token starting with "
     // is never a command, even if what's inside looks like one. An
@@ -141,20 +141,30 @@ object QueryDsl {
         while (i < n) {
             while (i < n && query[i].isWhitespace()) i++
             if (i >= n) break
+            // A leading "!" negates the term (query-dsl.md "Negation"). It is
+            // not part of the token: spanStart sits after it, so a completion
+            // replaces only what follows and keeps the "!". A lone "!" (nothing
+            // glued after it yet) is still forming: inert, no token at all.
+            var neg = false
+            if (query[i] == '!') {
+                if (i + 1 >= n || query[i + 1].isWhitespace()) { i++; continue }
+                neg = true
+                i++
+            }
             val spanStart = i
             if (query[i] == '"') {
                 val end = query.indexOf('"', i + 1)
                 if (end < 0) {
-                    out.add(Token(query.substring(i + 1), true, spanStart, unterminated = true))
+                    out.add(Token(query.substring(i + 1), true, spanStart, unterminated = true, neg = neg))
                     i = n
                 } else {
-                    out.add(Token(query.substring(i + 1, end), true, spanStart))
+                    out.add(Token(query.substring(i + 1, end), true, spanStart, neg = neg))
                     i = end + 1
                 }
             } else {
                 val start = i
                 while (i < n && !query[i].isWhitespace()) i++
-                out.add(Token(query.substring(start, i), false, spanStart))
+                out.add(Token(query.substring(start, i), false, spanStart, neg = neg))
             }
         }
         return out
@@ -208,8 +218,11 @@ object QueryDsl {
         Field.AGE -> compareBy { it.mtime }
     }
 
-    private class FilterTerm(val fields: List<Field>?, val alwaysFalse: Boolean, val value: String) {
-        fun matches(row: ConversationRow): Boolean {
+    private class FilterTerm(val fields: List<Field>?, val alwaysFalse: Boolean, val value: String, val neg: Boolean = false) {
+        // A negated term keeps exactly the rows its positive form drops
+        // (so an unresolvable path, which matches nothing, negates to "keep").
+        fun matches(row: ConversationRow): Boolean = positive(row) != neg
+        private fun positive(row: ConversationRow): Boolean {
             if (alwaysFalse) return false
             val flds = fields ?: return row.title.contains(value, ignoreCase = true)
             return flds.any { displayValue(row, it).contains(value, ignoreCase = true) }
@@ -240,7 +253,7 @@ object QueryDsl {
                 // quote ("log with no closing ") is genuinely incomplete
                 // (its own contents aren't even settled yet) and stays
                 // inert until it's closed.
-                if (!(tok.isQuoted && tok.unterminated)) filterTerms.add(FilterTerm(null, false, tok.raw))
+                if (!(tok.isQuoted && tok.unterminated)) filterTerms.add(FilterTerm(null, false, tok.raw, tok.neg))
                 idx += 1
                 continue
             }
@@ -251,10 +264,11 @@ object QueryDsl {
                         val valueTok = tokens.getOrNull(idx + 1)
                         if (valueTok != null && !isVerbArgToken(valueTok)) {
                             val fields = resolveFields(via)
+                            val neg = tok.neg || valueTok.neg
                             if (fields.isEmpty()) {
-                                filterTerms.add(FilterTerm(null, true, ""))
+                                filterTerms.add(FilterTerm(null, true, "", neg))
                             } else {
-                                filterTerms.add(FilterTerm(fields, false, valueTok.raw))
+                                filterTerms.add(FilterTerm(fields, false, valueTok.raw, neg))
                             }
                             idx += 2
                         } else {
@@ -267,13 +281,14 @@ object QueryDsl {
                             if (colon > 0) {
                                 val fields = resolveFields(argTok.raw.substring(0, colon))
                                 val value = argTok.raw.substring(colon + 1)
+                                val neg = tok.neg || argTok.neg
                                 if (fields.isEmpty()) {
-                                    filterTerms.add(FilterTerm(null, true, ""))
+                                    filterTerms.add(FilterTerm(null, true, "", neg))
                                 } else {
-                                    filterTerms.add(FilterTerm(fields, false, value))
+                                    filterTerms.add(FilterTerm(fields, false, value, neg))
                                 }
                             } else {
-                                filterTerms.add(FilterTerm(null, false, argTok.raw))
+                                filterTerms.add(FilterTerm(null, false, argTok.raw, tok.neg || argTok.neg))
                             }
                             idx += 2
                         } else {
@@ -282,6 +297,9 @@ object QueryDsl {
                     }
                 }
                 "s" -> {
+                    // "!/s" is inert (negation only means something on a row filter):
+                    // it still consumes its arguments, then the state is put back.
+                    val saved = listOf(hasSort, sortChain, sortInert, sortDescending)
                     hasSort = true
                     var consumed = 1
                     val chainSegs: List<String>? = if (via != null) {
@@ -312,9 +330,16 @@ object QueryDsl {
                         }
                     }
                     idx += consumed
+                    if (tok.neg) {
+                        hasSort = saved[0] as Boolean
+                        @Suppress("UNCHECKED_CAST")
+                        sortChain = saved[1] as List<Field>?
+                        sortInert = saved[2] as Boolean
+                        sortDescending = saved[3] as Boolean
+                    }
                 }
                 "rv" -> {
-                    reverse = true
+                    if (!tok.neg) reverse = true
                     idx += 1
                 }
                 else -> { // "ft" / "at" / "rt" -- parsed for correct arity, inert (fixed columns)
