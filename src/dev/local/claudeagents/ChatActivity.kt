@@ -449,7 +449,7 @@ class ChatActivity : Activity() {
                 DraftStore.set(this, sessionId, "")
                 // Always jump to the just-sent message and dismiss the
                 // keyboard -- asked for explicitly 2026-09-20, specifically
-                // for dictation's auto-send: DictateAccessibilityService.
+                // for dictation's auto-send: AssistantAccessibilityService.
                 // maybeAutoSend() fires this SAME click listener via a real
                 // ACTION_CLICK on this button, and by then the keyboard may
                 // have come back up (the field regained focus for the
