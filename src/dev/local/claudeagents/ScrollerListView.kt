@@ -65,7 +65,8 @@ class ScrollerListView(context: Context) : ListView(context) {
     }
 
     private fun thumbH(): Float =
-        (height.toFloat() * childCount / count.coerceAtLeast(1)).coerceIn(thumbMinH, height.toFloat())
+        (height.toFloat() * childCount / count.coerceAtLeast(1))
+            .coerceIn(thumbMinH.coerceAtMost(height.toFloat()), height.toFloat())
 
     private fun thumbTop(): Float = fraction() * (height - thumbH())
 
