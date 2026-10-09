@@ -45,48 +45,42 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
     // state immediately, matching how expandedIds already survives
     // recycling).
     private var highlightRowId: String? = null
-    private var highlightRange: IntRange? = null
+    private var sentenceRange: IntRange? = null
+    private var wordRange: IntRange? = null
 
-    fun setHighlight(rowId: String?, range: IntRange?) {
+    // Sentence = soft tint, word = solid accent -- the same pair the Read
+    // Aloud app draws.
+    private val sentenceBg = (Theme.primary and 0x00FFFFFF) or 0x44000000
+    private fun newSentenceSpans() = arrayOf<Any>(BackgroundColorSpan(sentenceBg))
+    private fun newWordSpans() = arrayOf<Any>(BackgroundColorSpan(Theme.primary), ForegroundColorSpan(Theme.onPrimary))
+
+    fun setHighlight(rowId: String?, sentence: IntRange?, word: IntRange?) {
         val previousRowId = highlightRowId
         highlightRowId = rowId
-        highlightRange = range
+        sentenceRange = sentence
+        wordRange = word
         val lv = listView ?: return
-        // Moving to a new row (a new section started, see
-        // ReadAloudController.onSectionChanged) leaves the old row's View
-        // still showing its last-applied highlight span -- ListView
-        // recycles views, so nothing else would ever clear it until that
-        // exact View instance happens to get rebound to different content
-        // (confirmed live 2026-09-09: the previous bubble's highlighted
-        // word stayed highlighted after the read moved on to the next
-        // message). Re-render it with no range first.
-        if (previousRowId != null && previousRowId != rowId) renderRowHighlight(lv, previousRowId, null)
-        renderRowHighlight(lv, rowId, range)
+        // Moving to a new row leaves the old row's View still showing its
+        // last-applied spans (ListView recycles views; confirmed live
+        // 2026-09-09) -- re-render it clean first.
+        if (previousRowId != null && previousRowId != rowId) renderRowHighlight(lv, previousRowId, null, null)
+        renderRowHighlight(lv, rowId, sentence, word)
     }
 
-    /** Cheap in-place update of one row's already-bound TextView, used for
-     * every highlight tick instead of notifyDataSetChanged() (would
-     * rebuild every visible row ~every 60ms -- visible flicker/jank during
-     * a read). Only ever touches a row highlightableText() actually
-     * approves -- a tool bundle, attachment, or a message whose markdown
-     * rendering changed its text can't safely have m.text's offsets
-     * applied to whatever's really on screen, so those are left alone
-     * exactly as getView() last rendered them. */
-    // The one highlight span, moved in place inside the row's own Spannable
-    // text. Re-setting the whole message text on every tick (the old
-    // approach) forced a full measure/layout each time and read as flicker;
-    // moving a BackgroundColorSpan (UpdateAppearance) only invalidates.
+    // The spans are moved in place inside the row's own Spannable text:
+    // re-setting the text on every tick forced a full measure/layout and
+    // read as flicker; adding/removing a span only invalidates.
     private var spanHost: android.text.Spannable? = null
-    private var spanObj: BackgroundColorSpan? = null
+    private var activeSpans: List<Any> = emptyList()
 
-    private fun clearSpan() {
-        spanObj?.let { spanHost?.removeSpan(it) }
-        spanObj = null
+    private fun clearSpans() {
+        spanHost?.let { h -> activeSpans.forEach { h.removeSpan(it) } }
+        activeSpans = emptyList()
     }
 
-    private fun renderRowHighlight(lv: ListView, rowId: String?, range: IntRange?) {
+    private fun renderRowHighlight(lv: ListView, rowId: String?, sentence: IntRange?, word: IntRange?) {
         if (rowId == null) return
-        if (range == null) { clearSpan(); return }
+        if (sentence == null && word == null) { clearSpans(); return }
         val pos = items.indexOfFirst { it.id == rowId }
         if (pos < 0) return
         val m = items[pos]
@@ -98,20 +92,65 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
         var host = tv.text as? android.text.Spannable
         if (host == null || host !== spanHost) {
             // First tick for this row's TextView (or it was rebound since):
-            // one setText, then every later tick just moves the span.
-            clearSpan()
+            // one setText, then every later tick just moves the spans.
+            clearSpans()
             tv.setText(base, TextView.BufferType.SPANNABLE)
             host = tv.text as android.text.Spannable
             spanHost = host
         }
-        val start = range.first.coerceIn(0, host.length)
-        val end = (range.last + 1).coerceIn(start, host.length)
-        clearSpan()
-        if (start < end) {
-            val sp = BackgroundColorSpan(0x552196F3)
-            host.setSpan(sp, start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-            spanObj = sp
+        clearSpans()
+        val h: android.text.Spannable = host
+        val spans = mutableListOf<Any>()
+        fun apply(r: IntRange?, make: () -> Array<Any>) {
+            if (r == null) return
+            val start = r.first.coerceIn(0, h.length)
+            val end = (r.last + 1).coerceIn(start, h.length)
+            if (start >= end) return
+            for (sp in make()) { h.setSpan(sp, start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE); spans.add(sp) }
         }
+        apply(sentence, ::newSentenceSpans)
+        apply(word, ::newWordSpans)
+        activeSpans = spans
+    }
+
+    /** Y (in the list's own coordinates) of character [offset] inside row
+     * [rowId], or null when that row isn't currently on screen. */
+    private fun offsetTopInList(lv: ListView, rowId: String, offset: Int): Int? {
+        val pos = items.indexOfFirst { it.id == rowId }
+        if (pos < 0) return null
+        val child = lv.getChildAt(pos - lv.firstVisiblePosition) ?: return null
+        val tv = (child.tag as? Holder)?.body?.getChildAt(0) as? TextView
+        val layout = tv?.layout
+        if (tv == null || layout == null) return child.top
+        var y = layout.getLineTop(layout.getLineForOffset(offset.coerceIn(0, tv.text.length)))
+        var v: View = tv
+        while (v !== child) { y += v.top; v = v.parent as? View ?: return child.top }
+        return child.top + y
+    }
+
+    /** Brings character [offset] of row [rowId] to the upper third of the
+     * list. With [force] false (auto-follow) it only moves when the spot
+     * has drifted out of the comfortable middle band, so a read doesn't
+     * nudge the list on every sentence. A row that is off screen is
+     * jumped to first, then refined once it has been laid out. */
+    fun scrollToOffset(rowId: String, offset: Int, force: Boolean) {
+        val lv = listView ?: return
+        val pos = items.indexOfFirst { it.id == rowId }
+        if (pos < 0) return
+        val y = offsetTopInList(lv, rowId, offset)
+        if (y != null) {
+            if (!force && y in (lv.height / 8)..(lv.height * 2 / 3)) return
+            lv.smoothScrollBy(y - lv.height / 3, 300)
+            return
+        }
+        lv.setSelectionFromTop(pos, 0)
+        lv.addOnLayoutChangeListener(object : View.OnLayoutChangeListener {
+            override fun onLayoutChange(v: View?, l: Int, t: Int, r: Int, b: Int, ol: Int, ot: Int, or2: Int, ob: Int) {
+                lv.removeOnLayoutChangeListener(this)
+                val y2 = offsetTopInList(lv, rowId, offset) ?: return
+                lv.smoothScrollBy(y2 - lv.height / 3, 200)
+            }
+        })
     }
 
     // The exact text a row's TextView shows when NOT highlighted, only for
@@ -137,12 +176,17 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
         return (segments.singleOrNull() as? MdSegment.Text)?.spanned
     }
 
-    private fun withHighlight(text: CharSequence, range: IntRange?): CharSequence {
-        if (range == null) return text
+    private fun withHighlight(text: CharSequence, sentence: IntRange?, word: IntRange?): CharSequence {
+        if (sentence == null && word == null) return text
         val sb = SpannableStringBuilder(text)
-        val start = range.first.coerceIn(0, sb.length)
-        val end = (range.last + 1).coerceIn(start, sb.length)
-        if (start < end) sb.setSpan(BackgroundColorSpan(0x552196F3), start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        fun apply(r: IntRange?, spans: Array<Any>) {
+            if (r == null) return
+            val start = r.first.coerceIn(0, sb.length)
+            val end = (r.last + 1).coerceIn(start, sb.length)
+            if (start < end) for (sp in spans) sb.setSpan(sp, start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+        }
+        apply(sentence, newSentenceSpans())
+        apply(word, newWordSpans())
         return sb
     }
 
@@ -341,7 +385,7 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
             }
         } else if (isUser) {
             val base = highlightableText(m) ?: m.text
-            val text = if (m.id == highlightRowId) withHighlight(base, highlightRange) else base
+            val text = if (m.id == highlightRowId) withHighlight(base, sentenceRange, wordRange) else base
             holder.body.addView(plainTextView(text, maxWidth))
         } else {
             // highlightableText() null means rendering isn't a safe target
@@ -353,7 +397,7 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
             val base = highlightableText(m)
             if (base != null) {
                 if (base.isNotEmpty()) {
-                    val text = if (m.id == highlightRowId) withHighlight(base, highlightRange) else base
+                    val text = if (m.id == highlightRowId) withHighlight(base, sentenceRange, wordRange) else base
                     holder.body.addView(plainTextView(text, maxWidth))
                 }
             } else {

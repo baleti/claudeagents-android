@@ -111,6 +111,15 @@ class ChatActivity : Activity() {
     // Parallel to the section list passed to readAloud.start() -- see
     // readAloudFrom().
     private var readAloudSectionRowIds: List<String> = emptyList()
+    private var readAloudSentence: IntRange? = null
+    // Auto-follow stands down for a few seconds after the user touches the
+    // screen, so reading along never fights a manual scroll.
+    @Volatile private var lastUserTouchMs = 0L
+
+    override fun dispatchTouchEvent(ev: android.view.MotionEvent): Boolean {
+        if (ev.action == android.view.MotionEvent.ACTION_DOWN || ev.action == android.view.MotionEvent.ACTION_MOVE) lastUserTouchMs = System.currentTimeMillis()
+        return super.dispatchTouchEvent(ev)
+    }
 
     companion object {
         private const val PICK_ATTACHMENT_REQUEST = 4201
@@ -310,28 +319,32 @@ class ChatActivity : Activity() {
                     playerBar.show()
                 } else {
                     playerBar.hide()
-                    adapter.setHighlight(null, null)
+                    adapter.setHighlight(null, null, null)
                     synthBanner.stop()
                     voiceBegun = false
                     voiceIndicator.end()
                 }
             },
             onPlayingChanged = { playing -> playerBar.setPlaying(playing) },
-            // One section == one message here (see readAloudFrom) --
-            // moving into a new section means a different message bubble
-            // is now the one being read, so the previous bubble's
-            // highlight needs clearing (the new section's own word-range
-            // highlight arrives moments later via onWordHighlight below).
-            // Also keeps the currently-reading bubble scrolled into view.
+            // One section == one message here (see readAloudFrom). Fires when
+            // the AUDIBLE message changes: clear the previous bubble's
+            // highlight (the new one's sentence/word highlight follows in
+            // the same tick).
             onSectionChanged = { sectionIndex ->
+                adapter.setHighlight(readAloudSectionRowIds.getOrNull(sectionIndex), null, null)
+            },
+            onSentenceHighlight = { sectionIndex, charStart, charEnd ->
                 val rowId = readAloudSectionRowIds.getOrNull(sectionIndex)
-                adapter.setHighlight(rowId, null)
-                val pos = adapter.items.indexOfFirst { it.id == rowId }
-                if (pos >= 0) listView.smoothScrollToPosition(pos)
+                if (rowId != null && charEnd > charStart) {
+                    readAloudSentence = charStart..(charEnd - 1)
+                    adapter.setHighlight(rowId, readAloudSentence, null)
+                    // Follow along, unless the user is scrolling around.
+                    if (System.currentTimeMillis() - lastUserTouchMs > 5000) adapter.scrollToOffset(rowId, charStart, force = false)
+                }
             },
             onWordHighlight = { sectionIndex, charStart, charEnd ->
                 val rowId = readAloudSectionRowIds.getOrNull(sectionIndex)
-                if (charEnd > charStart) adapter.setHighlight(rowId, charStart..(charEnd - 1))
+                if (charEnd > charStart) adapter.setHighlight(rowId, readAloudSentence, charStart..(charEnd - 1))
             },
             onGenerating = { generating, estimatedMs ->
                 if (generating) synthBanner.start(estimatedMs) else synthBanner.stop()
@@ -365,9 +378,9 @@ class ChatActivity : Activity() {
             // scrolling away to reread something earlier needs a manual
             // way back to the live position too.
             onLocate = {
-                val rowId = readAloudSectionRowIds.getOrNull(readAloud.getCurrentSectionIndex())
-                val pos = adapter.items.indexOfFirst { it.id == rowId }
-                if (pos >= 0) listView.smoothScrollToPosition(pos)
+                lastUserTouchMs = 0
+                val rowId = readAloudSectionRowIds.getOrNull(readAloud.getPlayingSectionIndex())
+                if (rowId != null) adapter.scrollToOffset(rowId, readAloud.getPlayingSentenceStart().coerceAtLeast(0), force = true)
             },
             getPosition = { readAloud.getPositionMs() },
             getDuration = { readAloud.getDurationMs() },

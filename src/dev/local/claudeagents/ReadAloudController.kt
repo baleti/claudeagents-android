@@ -59,6 +59,10 @@ class ReadAloudController(
     // range a caller would slice out of that one section's own source
     // text to know what to highlight in whatever view represents it.
     private val onWordHighlight: (sectionIndex: Int, charStart: Int, charEnd: Int) -> Unit = { _, _, _ -> },
+    // Fires as each sentence starts playing, with its character range
+    // within sections[sectionIndex] -- the sentence-level highlight that
+    // sits under the word highlight (same pair the Read Aloud app draws).
+    private val onSentenceHighlight: (sectionIndex: Int, charStart: Int, charEnd: Int) -> Unit = { _, _, _ -> },
     // Fires true (with a live best-guess of how many ms the wait will be)
     // right when start() is called and again after a sentence finishes
     // playing with nothing queued yet to follow it; false once the next
@@ -161,6 +165,48 @@ class ReadAloudController(
     private var currentSentenceStartOffset = 0
     private var currentWordRanges: List<IntRange> = emptyList()
 
+    // The section whose audio is actually PLAYING. currentSectionIndex runs
+    // ahead of this: it advances the moment the server has finished SENDING
+    // a section (handleSectionDone), while that section's last sentences
+    // are still queued in the player. Highlighting and the locate button
+    // must follow what is audible, so each queued sentence is tagged with
+    // its section (keyed by the identity of its words list, which
+    // TtsPlaybackService hands back untouched in onSentenceStart).
+    @Volatile private var playingSectionIndex = -1
+    @Volatile private var playingSentenceStart = -1
+    private val sentenceSection = java.util.IdentityHashMap<List<WordTiming>, Int>()
+    // Whitespace-collapsed copy of the playing section + map back to
+    // original offsets, so a server sentence (newlines folded to spaces)
+    // still finds its place in the multi-line source text.
+    private var normSection = -1
+    private var normText = ""
+    private var normMap = IntArray(0)
+    private var normCursor = 0
+
+    private fun enqueueTagged(svc: TtsPlaybackService, section: Int, text: String, words: List<WordTiming>, pcm: ByteArray, sampleRate: Int) {
+        synchronized(sentenceSection) { sentenceSection[words] = section }
+        svc.enqueueSentence(text, words, pcm, sampleRate)
+    }
+
+    private fun collapseWithMap(t: String): Pair<String, IntArray> {
+        val sb = StringBuilder(t.length)
+        val map = IntArray(t.length + 1)
+        var lastSpace = true
+        for (i in t.indices) {
+            val c = t[i]
+            if (c.isWhitespace()) {
+                if (!lastSpace) { map[sb.length] = i; sb.append(' '); lastSpace = true }
+            } else { map[sb.length] = i; sb.append(c); lastSpace = false }
+        }
+        return sb.toString() to map
+    }
+
+    /** Character range (within the playing section) of the sentence now
+     * being spoken, or null before the first one / when it couldn't be
+     * placed. */
+    fun getPlayingSentenceStart(): Int = playingSentenceStart
+    fun getPlayingSectionIndex(): Int = if (playingSectionIndex >= 0) playingSectionIndex else currentSectionIndex
+
     // Rolling average of synth_ms across this controller's own observed
     // sentences (kept across separate start() calls in the same Activity,
     // not just within one session).
@@ -184,25 +230,44 @@ class ReadAloudController(
     private val playbackListener = object : TtsPlaybackService.HighlightListener {
         override fun onSentenceStart(text: String, words: List<WordTiming>, startMs: Long) {
             val local = localSpoken.contains(text)
+            val tagged = synchronized(sentenceSection) { sentenceSection.remove(words) }
             mainHandler.post {
                 onVoiceSource(local)
                 onGenerating(false, 0L)
-                val sectionText = sections.getOrNull(currentSectionIndex) ?: return@post
-                var idx = sectionText.indexOf(text, searchCursor)
-                if (idx < 0) idx = sectionText.indexOf(text) // shouldn't happen; best effort
-                if (idx < 0) {
-                    // Can't safely place a span for this sentence -- most
-                    // often means the section's source text contained
-                    // markdown syntax the server's markdown_to_speech()
-                    // stripped before echoing this sentence back, so the
-                    // strings no longer match exactly. Audio still plays
-                    // fine; this sentence just isn't highlighted.
+                val secIdx = tagged ?: currentSectionIndex
+                if (secIdx != playingSectionIndex) {
+                    playingSectionIndex = secIdx
+                    searchCursor = 0
+                    normCursor = 0
+                    normSection = -1
+                    playingSentenceStart = -1
                     currentWordRanges = emptyList()
+                    onSectionChanged.invoke(secIdx)
+                }
+                val sectionText = sections.getOrNull(secIdx) ?: return@post
+                if (normSection != secIdx) {
+                    val (n, m) = collapseWithMap(sectionText)
+                    normText = n; normMap = m; normSection = secIdx; normCursor = 0
+                }
+                val needle = collapseWithMap(text).first.trim()
+                var at = if (needle.isEmpty()) -1 else normText.indexOf(needle, normCursor)
+                if (at < 0 && needle.isNotEmpty()) at = normText.indexOf(needle)
+                if (at < 0 && needle.length > 30) at = normText.indexOf(needle.take(30))
+                if (at < 0) {
+                    // Can't place this sentence (the server reworded it
+                    // beyond whitespace). Audio still plays fine.
+                    currentWordRanges = emptyList()
+                    playingSentenceStart = -1
                     return@post
                 }
-                currentSentenceStartOffset = idx
-                searchCursor = idx + text.length
-                currentWordRanges = computeWordRanges(text, words)
+                normCursor = at
+                val sStart = normMap[at]
+                val lastN = (at + needle.length - 1).coerceIn(at, (normText.length - 1).coerceAtLeast(0))
+                val sEnd = (normMap[lastN] + 1).coerceAtMost(sectionText.length)
+                currentSentenceStartOffset = sStart
+                playingSentenceStart = sStart
+                currentWordRanges = computeWordRanges(sectionText.substring(sStart, sEnd), words)
+                onSentenceHighlight.invoke(secIdx, sStart, sEnd)
             }
         }
 
@@ -211,7 +276,7 @@ class ReadAloudController(
                 if (wordIndex !in currentWordRanges.indices) return@post
                 val range = currentWordRanges[wordIndex]
                 onWordHighlight.invoke(
-                    currentSectionIndex,
+                    playingSectionIndex.takeIf { it >= 0 } ?: currentSectionIndex,
                     currentSentenceStartOffset + range.first,
                     currentSentenceStartOffset + range.last + 1,
                 )
@@ -327,6 +392,7 @@ class ReadAloudController(
         this.liveMode = live
         this.stalledAtEnd = false
         currentSectionIndex = 0
+        resetPlayingSection()
         active = true
         onStateChanged.invoke(true)
         if (synthSampleCount == 0) {
@@ -445,7 +511,15 @@ class ReadAloudController(
      * here on - used by every "abandon everything and jump elsewhere"
      * entry point (skip forward/back, stop()). Ordinary section-to-section
      * chaining does NOT call this - see SectionSession's own doc. */
+    private fun resetPlayingSection() {
+        playingSectionIndex = -1
+        playingSentenceStart = -1
+        normSection = -1
+        synchronized(sentenceSection) { sentenceSection.clear() }
+    }
+
     private fun abandonSessions() {
+        resetPlayingSection()
         streamGeneration++
         liveSession?.ws?.close()
         aheadSession?.ws?.close()
@@ -486,10 +560,6 @@ class ReadAloudController(
      * same "one ahead" principle as the GPU pipelining that motivated it. */
     private fun promote(svc: TtsPlaybackService, session: SectionSession) {
         val idx = session.index
-        searchCursor = 0
-        currentSentenceStartOffset = 0
-        currentWordRanges = emptyList()
-        onSectionChanged.invoke(idx)
         liveSession = session
         ws = session.ws
 
@@ -501,7 +571,7 @@ class ReadAloudController(
             session.buffer.clear()
             alreadyDone = session.done
         }
-        for (p in flushed) svc.enqueueSentence(p.text, p.words, p.pcm, p.sampleRate)
+        for (p in flushed) enqueueTagged(svc, idx, p.text, p.words, p.pcm, p.sampleRate)
 
         // Tells the server how far playback has actually gotten into this
         // section, every 500ms, so it can cap how far ahead of that it
@@ -641,7 +711,7 @@ class ReadAloudController(
                     synchronized(feedLock) {
                         if (!isCurrent() || serverTookOver) return@Thread
                         localSpoken.add(sentence)
-                        svc.enqueueSentence(sentence, estimateWordTimings(sentence, audio.size.toLong() / 2 * 1000 / sr), audio, sr)
+                        enqueueTagged(svc, idx, sentence, estimateWordTimings(sentence, audio.size.toLong() / 2 * 1000 / sr), audio, sr)
                         localEnd = range.last + 1
                     }
                 }
@@ -735,7 +805,7 @@ class ReadAloudController(
                     val enqueueNow = synchronized(session) {
                         if (session.live) true else { session.buffer.add(audio); false }
                     }
-                    if (enqueueNow) svc.enqueueSentence(audio.text, audio.words, audio.pcm, audio.sampleRate)
+                    if (enqueueNow) enqueueTagged(svc, idx, audio.text, audio.words, audio.pcm, audio.sampleRate)
                 }
 
                 override fun onFailure(error: Throwable) {
@@ -813,13 +883,14 @@ class ReadAloudController(
         val ranges = mutableListOf<IntRange>()
         var searchFrom = 0
         for (w in words) {
-            val idx = sentenceText.indexOf(w.word, searchFrom)
+            val word = w.word.trim()
+            val idx = if (word.isEmpty()) -1 else sentenceText.indexOf(word, searchFrom)
             if (idx < 0) {
                 ranges.add(IntRange.EMPTY)
                 continue
             }
-            ranges.add(idx..(idx + w.word.length - 1))
-            searchFrom = idx + w.word.length
+            ranges.add(idx..(idx + word.length - 1))
+            searchFrom = idx + word.length
         }
         return ranges
     }
