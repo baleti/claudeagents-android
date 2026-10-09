@@ -1360,7 +1360,7 @@ class ChatActivity : Activity() {
     // Falls back to the raw source for anything more complex (a table) --
     // still gets read aloud, just without a highlight.
     private fun ttsTextFor(row: ChatDisplayRow): String =
-        Markdown.singleSegmentPlainText(row.text, dimColor = Theme.muted) ?: row.text
+        adapter.speechLayoutFor(row)?.text ?: row.text
 
     /** Feeds any newly-synced messages after the last one Read Aloud
      * already knows about into the running session, if one is active --

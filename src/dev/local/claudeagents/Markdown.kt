@@ -12,6 +12,16 @@ import android.text.style.RelativeSizeSpan
 import android.text.style.StyleSpan
 import android.text.style.TypefaceSpan
 
+/** One rendered view's worth of a message (a text block or a table) and the
+ * [start, end) range of the speech text it covers. */
+class SpeechPart(val start: Int, val end: Int, val seg: MdSegment)
+
+/** The exact text sent to the TTS server for a message, plus where each
+ * rendered view sits in it -- so a sentence/word range reported against
+ * [text] can be mapped back onto the right on-screen TextView. [parts] are
+ * in view order (empty text blocks, which render no view, are left out). */
+class SpeechLayout(val text: String, val parts: List<SpeechPart>)
+
 sealed class MdSegment {
     data class Text(val spanned: SpannableStringBuilder) : MdSegment()
     data class Table(val header: List<String>, val rows: List<List<String>>) : MdSegment()
@@ -58,6 +68,23 @@ object Markdown {
     // markdown source for those, accepting no highlight for that message
     // (a table/multi-segment layout has no single linear text a highlight
     // span could safely land in anyway).
+    fun speechLayout(src: String, dimColor: Int): SpeechLayout {
+        val sb = StringBuilder()
+        val parts = mutableListOf<SpeechPart>()
+        for (seg in renderSegments(src, dimColor)) {
+            val piece = when (seg) {
+                is MdSegment.Text -> seg.spanned.toString()
+                is MdSegment.Table -> (listOf(seg.header) + seg.rows).joinToString("\n") { r -> r.joinToString(", ") + "." }
+            }
+            if (seg is MdSegment.Text && piece.isEmpty()) continue
+            if (sb.isNotEmpty()) sb.append("\n\n")
+            val start = sb.length
+            sb.append(piece)
+            parts.add(SpeechPart(start, sb.length, seg))
+        }
+        return SpeechLayout(sb.toString(), parts)
+    }
+
     fun singleSegmentPlainText(text: String, dimColor: Int): String? {
         val seg = renderSegments(text, dimColor).singleOrNull() as? MdSegment.Text ?: return null
         return seg.spanned.toString()

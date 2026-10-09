@@ -67,63 +67,99 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
         renderRowHighlight(lv, rowId, sentence, word)
     }
 
-    // The spans are moved in place inside the row's own Spannable text:
+    // The spans are moved in place inside the row's own Spannable texts:
     // re-setting the text on every tick forced a full measure/layout and
     // read as flicker; adding/removing a span only invalidates.
-    private var spanHost: android.text.Spannable? = null
-    private var activeSpans: List<Any> = emptyList()
+    private val spanHosts = java.util.IdentityHashMap<android.text.Spannable, Boolean>()
+    private var activeSpans: List<Pair<android.text.Spannable, Any>> = emptyList()
 
     private fun clearSpans() {
-        spanHost?.let { h -> activeSpans.forEach { h.removeSpan(it) } }
+        activeSpans.forEach { (h, sp) -> h.removeSpan(sp) }
         activeSpans = emptyList()
     }
+
+    private fun localRange(r: IntRange?, part: SpeechPart): IntRange? {
+        if (r == null) return null
+        val s = maxOf(r.first, part.start)
+        val e = minOf(r.last + 1, part.end)
+        return if (s < e) (s - part.start)..(e - part.start - 1) else null
+    }
+
+    // Speech layouts are rebuilt from markdown, so keep recent ones: the
+    // highlight asks for one on every ~60ms tick.
+    private val layoutCache = object : LinkedHashMap<String, Pair<String, SpeechLayout>>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<String, SpeechLayout>>?) = size > 64
+    }
+
+    /** What a prose row says aloud and where each of its views sits in that
+     * text; null for rows that are never read (tool bundles, attachments). */
+    fun speechLayoutFor(m: ChatDisplayRow): SpeechLayout? {
+        if (m.toolItems != null || m.attachment != null) return null
+        val key = m.id ?: return buildSpeechLayout(m)
+        layoutCache[key]?.let { if (it.first == m.text) return it.second }
+        val built = buildSpeechLayout(m)
+        layoutCache[key] = m.text to built
+        return built
+    }
+
+    private fun buildSpeechLayout(m: ChatDisplayRow): SpeechLayout =
+        if (m.role == "user") SpeechLayout(m.text, listOf(SpeechPart(0, m.text.length, MdSegment.Text(SpannableStringBuilder(m.text)))))
+        else Markdown.speechLayout(m.text, dimColor = Theme.muted)
 
     private fun renderRowHighlight(lv: ListView, rowId: String?, sentence: IntRange?, word: IntRange?) {
         if (rowId == null) return
         if (sentence == null && word == null) { clearSpans(); return }
         val pos = items.indexOfFirst { it.id == rowId }
         if (pos < 0) return
-        val m = items[pos]
-        val base = highlightableText(m) ?: return
+        val layout = speechLayoutFor(items[pos]) ?: return
         val childIdx = pos - lv.firstVisiblePosition
         if (childIdx !in 0 until lv.childCount) return
         val holder = lv.getChildAt(childIdx)?.tag as? Holder ?: return
-        val tv = holder.body.getChildAt(0) as? TextView ?: return
-        var host = tv.text as? android.text.Spannable
-        if (host == null || host !== spanHost) {
-            // First tick for this row's TextView (or it was rebound since):
-            // one setText, then every later tick just moves the spans.
-            clearSpans()
-            tv.setText(base, TextView.BufferType.SPANNABLE)
-            host = tv.text as android.text.Spannable
-            spanHost = host
-        }
         clearSpans()
-        val h: android.text.Spannable = host
-        val spans = mutableListOf<Any>()
-        fun apply(r: IntRange?, make: () -> Array<Any>) {
-            if (r == null) return
-            val start = r.first.coerceIn(0, h.length)
-            val end = (r.last + 1).coerceIn(start, h.length)
-            if (start >= end) return
-            for (sp in make()) { h.setSpan(sp, start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE); spans.add(sp) }
+        val spans = mutableListOf<Pair<android.text.Spannable, Any>>()
+        for ((i, part) in layout.parts.withIndex()) {
+            val seg = part.seg as? MdSegment.Text ?: continue
+            val sLocal = localRange(sentence, part)
+            val wLocal = localRange(word, part)
+            if (sLocal == null && wLocal == null) continue
+            val tv = holder.body.getChildAt(i) as? TextView ?: continue
+            var host = tv.text as? android.text.Spannable
+            if (host == null || spanHosts[host] != true) {
+                // First tick for this TextView (or it was rebound since):
+                // one setText, then every later tick just moves the spans.
+                tv.setText(seg.spanned, TextView.BufferType.SPANNABLE)
+                host = tv.text as android.text.Spannable
+                spanHosts[host] = true
+            }
+            val h: android.text.Spannable = host
+            fun apply(r: IntRange?, made: Array<Any>) {
+                if (r == null) return
+                val start = r.first.coerceIn(0, h.length)
+                val end = (r.last + 1).coerceIn(start, h.length)
+                if (start >= end) return
+                for (sp in made) { h.setSpan(sp, start, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE); spans.add(h to sp) }
+            }
+            apply(sLocal, newSentenceSpans())
+            apply(wLocal, newWordSpans())
         }
-        apply(sentence, ::newSentenceSpans)
-        apply(word, ::newWordSpans)
         activeSpans = spans
     }
 
-    /** Y (in the list's own coordinates) of character [offset] inside row
-     * [rowId], or null when that row isn't currently on screen. */
+    /** Y (in the list's own coordinates) of character [offset] of row
+     * [rowId]'s speech text, or null when that row isn't on screen. */
     private fun offsetTopInList(lv: ListView, rowId: String, offset: Int): Int? {
         val pos = items.indexOfFirst { it.id == rowId }
         if (pos < 0) return null
         val child = lv.getChildAt(pos - lv.firstVisiblePosition) ?: return null
-        val tv = (child.tag as? Holder)?.body?.getChildAt(0) as? TextView
-        val layout = tv?.layout
-        if (tv == null || layout == null) return child.top
-        var y = layout.getLineTop(layout.getLineForOffset(offset.coerceIn(0, tv.text.length)))
-        var v: View = tv
+        val holder = child.tag as? Holder ?: return child.top
+        val layout = speechLayoutFor(items[pos]) ?: return child.top
+        val i = layout.parts.indexOfLast { it.start <= offset }.coerceAtLeast(0)
+        val part = layout.parts.getOrNull(i) ?: return child.top
+        val target = holder.body.getChildAt(i) ?: return child.top
+        var y = 0
+        val tl = (target as? TextView)?.layout
+        if (tl != null) y = tl.getLineTop(tl.getLineForOffset((offset - part.start).coerceIn(0, target.text.length)))
+        var v: View = target
         while (v !== child) { y += v.top; v = v.parent as? View ?: return child.top }
         return child.top + y
     }
@@ -151,29 +187,6 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
                 lv.smoothScrollBy(y2 - lv.height / 3, 200)
             }
         })
-    }
-
-    // The exact text a row's TextView shows when NOT highlighted, only for
-    // rows where read-aloud highlighting can safely apply -- shared between
-    // getView() (initial/recycled bind) and renderRowHighlight() (per-tick
-    // update) so the two can never disagree about what "unhighlighted"
-    // looks like for a given row.
-    private fun highlightableText(m: ChatDisplayRow): CharSequence? {
-        if (m.toolItems != null || m.attachment != null) return null
-        if (m.role == "user") return m.text
-        // ChatActivity.readAloudFrom() now sends this SAME rendered plain
-        // text (Markdown.singleSegmentPlainText) to the TTS server, not
-        // the raw markdown source -- so word-timing offsets always line up
-        // with what's shown here. Previously this required the rendered
-        // form to be byte-IDENTICAL to the raw source (i.e. only messages
-        // with no markdown at all), which real Claude replies almost never
-        // satisfy, silently disabling highlighting for nearly every
-        // message (reported live 2026-09-21: "still isn't highlighting").
-        // Only requirement left: a single plain-text segment, no table --
-        // see MessageAdapter's getView for the matching fallback when this
-        // returns null.
-        val segments = Markdown.renderSegments(m.text, dimColor = Theme.muted)
-        return (segments.singleOrNull() as? MdSegment.Text)?.spanned
     }
 
     private fun withHighlight(text: CharSequence, sentence: IntRange?, word: IntRange?): CharSequence {
@@ -383,31 +396,20 @@ class MessageAdapter(private val context: Context) : BaseAdapter() {
                 }
                 holder.body.addView(itemContainer)
             }
-        } else if (isUser) {
-            val base = highlightableText(m) ?: m.text
-            val text = if (m.id == highlightRowId) withHighlight(base, sentenceRange, wordRange) else base
-            holder.body.addView(plainTextView(text, maxWidth))
         } else {
-            // highlightableText() null means rendering isn't a safe target
-            // for a read-aloud highlight (real markdown formatting, a
-            // table, ...) -- falls back to the normal unconditional
-            // per-segment render, same as before highlighting existed.
-            // Audio still plays fine either way; see highlightableText's
-            // own doc comment for why.
-            val base = highlightableText(m)
-            if (base != null) {
-                if (base.isNotEmpty()) {
-                    val text = if (m.id == highlightRowId) withHighlight(base, sentenceRange, wordRange) else base
-                    holder.body.addView(plainTextView(text, maxWidth))
-                }
-            } else {
-                for (seg in Markdown.renderSegments(m.text, dimColor = Theme.muted)) {
-                    when (seg) {
-                        is MdSegment.Text -> if (seg.spanned.isNotEmpty()) {
-                            holder.body.addView(plainTextView(seg.spanned, maxWidth))
-                        }
-                        is MdSegment.Table -> holder.body.addView(buildTableView(seg))
+            // Every part of the speech layout becomes one view in order (a
+            // text block or a table), which is what lets the read-aloud
+            // highlight find its TextView by index. The row being read
+            // gets its current sentence/word baked in on (re)bind.
+            val layout = speechLayoutFor(m)!!
+            val reading = m.id == highlightRowId
+            for (part in layout.parts) {
+                when (val seg = part.seg) {
+                    is MdSegment.Text -> {
+                        val text = if (reading) withHighlight(seg.spanned, localRange(sentenceRange, part), localRange(wordRange, part)) else seg.spanned
+                        holder.body.addView(plainTextView(text, maxWidth))
                     }
+                    is MdSegment.Table -> holder.body.addView(buildTableView(seg))
                 }
             }
         }

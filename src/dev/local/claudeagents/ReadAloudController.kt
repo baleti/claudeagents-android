@@ -253,6 +253,7 @@ class ReadAloudController(
                 var at = if (needle.isEmpty()) -1 else normText.indexOf(needle, normCursor)
                 if (at < 0 && needle.isNotEmpty()) at = normText.indexOf(needle)
                 if (at < 0 && needle.length > 30) at = normText.indexOf(needle.take(30))
+                android.util.Log.d("RAHighlight", "sentence sec=$secIdx tagged=${tagged != null} len=${text.length} needle=${needle.length} secLen=${sectionText.length} at=$at")
                 if (at < 0) {
                     // Can't place this sentence (the server reworded it
                     // beyond whitespace). Audio still plays fine.
