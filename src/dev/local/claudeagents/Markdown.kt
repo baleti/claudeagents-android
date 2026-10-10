@@ -74,7 +74,14 @@ object Markdown {
         for (seg in renderSegments(src, dimColor)) {
             val piece = when (seg) {
                 is MdSegment.Text -> seg.spanned.toString()
-                is MdSegment.Table -> (listOf(seg.header) + seg.rows).joinToString("\n") { r -> r.joinToString(", ") + "." }
+                // Tables are skipped aloud (cell after cell is unlistenable):
+                // just announce the shape and the column names.
+                is MdSegment.Table -> {
+                    val n = seg.rows.size
+                    val cols = seg.header.map { it.trim() }.filter { it.isNotEmpty() }.take(6)
+                    "A table with $n ${if (n == 1) "row" else "rows"} follows" +
+                        (if (cols.isNotEmpty()) ", with columns " + cols.joinToString(", ") else "") + "."
+                }
             }
             if (seg is MdSegment.Text && piece.isEmpty()) continue
             if (sb.isNotEmpty()) sb.append("\n\n")
