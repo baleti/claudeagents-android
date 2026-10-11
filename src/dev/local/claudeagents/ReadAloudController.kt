@@ -726,6 +726,68 @@ class ReadAloudController(
             }.apply { isDaemon = true; name = "ReadAloudLocalTts"; start() }
         }
 
+        // Rescue: if the Chatterbox stream fails for ANY reason once it had taken over (or local never
+        // started, e.g. any section after the first), show an error and let on-device TTS read
+        // everything the server did not deliver, then finish the section. Playback must never stop.
+        val allSentences = splitLocalSentences(text)
+        val rescueStarted = java.util.concurrent.atomic.AtomicBoolean(false)
+        val fallbackNotified = java.util.concurrent.atomic.AtomicBoolean(false)
+        var doneReceived = false
+        fun notifyFallback(why: String) {
+            if (!fallbackNotified.compareAndSet(false, true)) return
+            mainHandler.post {
+                android.widget.Toast.makeText(context, "Chatterbox unavailable ($why) - using on-device voice", android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
+        fun startRescue(why: String) {
+            if (doneReceived || !isCurrent()) return
+            notifyFallback(why)
+            if (!(serverTookOver || localSentences.isEmpty())) return // the first local thread still covers it
+            if (!rescueStarted.compareAndSet(false, true)) return
+            Log.w("ReadAloudController", "server stream failed ($why): on-device TTS takes over")
+            Thread {
+                var skippedTo = 0
+                try {
+                    localBridge.warmUp()
+                    if (!localBridge.isReady() && !localBridge.awaitReady(15000)) {
+                        Log.e("ReadAloudController", "rescue: no on-device TTS available"); return@Thread
+                    }
+                    while (isCurrent()) {
+                        val from = synchronized(feedLock) { maxOf(serverCursor, localEnd, skippedTo) }
+                        val range = allSentences.firstOrNull { it.last + 1 > from } ?: break
+                        while (isCurrent() && svc.bufferedAheadMs() > 700) Thread.sleep(100)
+                        val sentence = text.substring(range)
+                        var pcm: ByteArray? = null
+                        var sr = 0
+                        for (attempt in 0..1) {
+                            val latch = java.util.concurrent.CountDownLatch(1)
+                            localBridge.synthesize(speakableForLocalTts(sentence)) { p, r -> pcm = p; sr = r; latch.countDown() }
+                            latch.await(4, java.util.concurrent.TimeUnit.SECONDS)
+                            if (pcm != null && sr > 0 && pcm!!.isNotEmpty()) break
+                            pcm = null
+                        }
+                        val audio = pcm
+                        if (audio == null) { skippedTo = range.last + 1; continue }
+                        synchronized(feedLock) {
+                            if (!isCurrent()) return@synchronized
+                            localSpoken.add(sentence)
+                            val words = estimateWordTimings(sentence, audio.size.toLong() / 2 * 1000 / sr)
+                            val enqueueNow = synchronized(session) {
+                                if (session.live) true else { session.buffer.add(PendingAudio(sentence, words, audio, sr)); false }
+                            }
+                            if (enqueueNow) enqueueTagged(svc, idx, sentence, words, audio, sr)
+                            localEnd = range.last + 1
+                        }
+                    }
+                } finally {
+                    if (isCurrent() && sectionFinished.compareAndSet(false, true)) {
+                        val wasLive = synchronized(session) { session.done = true; session.live }
+                        if (wasLive) mainHandler.post { if (isCurrent()) handleSectionDone(svc, session) }
+                    }
+                }
+            }.apply { isDaemon = true; name = "ReadAloudRescue"; start() }
+        }
+
         Thread {
             client.connect(object : WebSocketClient.Listener {
                 private var pendingMeta: JSONObject? = null
@@ -756,6 +818,7 @@ class ReadAloudController(
                             mainHandler.post { onStatus(m, k, n) }
                         }
                         "done" -> {
+                            doneReceived = true
                             if (localSentences.isNotEmpty() && !sectionFinished.compareAndSet(false, true)) return
                             val wasLive = synchronized(session) {
                                 session.done = true
@@ -765,14 +828,8 @@ class ReadAloudController(
                         }
                         "error" -> {
                             Log.e("ReadAloudController", "server error: ${obj.optString("message")}")
-                            if (localSentences.isNotEmpty() && !serverTookOver) return // local TTS keeps reading
-                            svc.endSession()
-                            mainHandler.post {
-                                if (active) {
-                                    active = false
-                                    onStateChanged.invoke(false)
-                                }
-                            }
+                            notifyFallback(obj.optString("message").take(60))
+                            startRescue("error")
                         }
                     }
                 }
@@ -794,13 +851,11 @@ class ReadAloudController(
                     // Local bridge may already have spoken this sentence:
                     // drop the server's copy; otherwise the server has
                     // caught up, so local stops for good.
-                    if (localSentences.isNotEmpty()) {
-                        synchronized(feedLock) {
-                            val at = text.indexOf(sentenceText, serverCursor)
-                            if (at >= 0) serverCursor = at + sentenceText.length
-                            if (at >= 0 && at + sentenceText.length <= localEnd) return
-                            serverTookOver = true
-                        }
+                    synchronized(feedLock) {
+                        val at = text.indexOf(sentenceText, serverCursor)
+                        if (at >= 0) serverCursor = at + sentenceText.length
+                        if (localSentences.isNotEmpty() && at >= 0 && at + sentenceText.length <= localEnd) return
+                        serverTookOver = true
                     }
 
                     val audio = PendingAudio(sentenceText, words, data, meta.getInt("sample_rate"))
@@ -813,13 +868,13 @@ class ReadAloudController(
                 override fun onFailure(error: Throwable) {
                     if (!isCurrent()) return // expected: abandonSessions()'s close() surfaces as a failure on the abandoned connection
                     Log.e("ReadAloudController", "websocket failed", error)
-                    if (localSentences.isNotEmpty() && !serverTookOver) return // local TTS keeps reading
-                    mainHandler.post {
-                        active = false
-                        onStateChanged.invoke(false)
-                    }
+                    notifyFallback(error.message?.take(60) ?: "connection failed")
+                    startRescue("websocket failure")
                 }
+
+                override fun onClosed() { if (isCurrent()) startRescue("socket closed") }
             })
+            startRescue("connection ended") // no-op after a normal "done"
         }.apply { isDaemon = true; name = "ReadAloudWs"; start() }
     }
 
