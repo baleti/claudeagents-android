@@ -696,7 +696,7 @@ class ReadAloudController(
 
         if (bridge != null && localSentences.isNotEmpty()) {
             Thread {
-                if (!readyNow && !bridge.awaitReady(4000)) return@Thread
+                if (!readyNow && !bridge.awaitReady(15000)) return@Thread
                 for ((i, range) in localSentences.withIndex()) {
                     if (!isCurrent() || serverTookOver) return@Thread
                     while (i > 0 && isCurrent() && !serverTookOver && svc.bufferedAheadMs() > 700) Thread.sleep(100)
@@ -706,9 +706,10 @@ class ReadAloudController(
                     var pcm: ByteArray? = null
                     var sr = 0
                     bridge.synthesize(speakableForLocalTts(sentence)) { p, r -> pcm = p; sr = r; latch.countDown() }
-                    if (!latch.await(4, java.util.concurrent.TimeUnit.SECONDS)) return@Thread
+                    // One bad sentence must never end local reading (the server may be down): skip it.
+                    if (!latch.await(4, java.util.concurrent.TimeUnit.SECONDS)) continue
                     val audio = pcm
-                    if (audio == null || sr <= 0 || audio.isEmpty()) return@Thread
+                    if (audio == null || sr <= 0 || audio.isEmpty()) continue
                     synchronized(feedLock) {
                         if (!isCurrent() || serverTookOver) return@Thread
                         localSpoken.add(sentence)
