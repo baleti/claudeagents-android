@@ -755,8 +755,19 @@ class ReadAloudController(
                     while (isCurrent()) {
                         val from = synchronized(feedLock) { maxOf(serverCursor, localEnd, skippedTo) }
                         val range = allSentences.firstOrNull { it.last + 1 > from } ?: break
-                        while (isCurrent() && svc.bufferedAheadMs() > 700) Thread.sleep(100)
+                        // Wait for the queue to drain, but never forever: if playback is wedged (underrun after a
+                        // network drop, focus loss that never returned) the buffer never shrinks and the rescue
+                        // would sit here silently. If it has not shrunk for 6s, carry on and feed the next sentence.
+                        var lastAhead = svc.bufferedAheadMs(); var stuckMs = 0
+                        while (isCurrent() && svc.bufferedAheadMs() > 700) {
+                            Thread.sleep(100)
+                            val now = svc.bufferedAheadMs()
+                            if (now < lastAhead) { stuckMs = 0 } else stuckMs += 100
+                            lastAhead = now
+                            if (stuckMs >= 6000) { Log.w("ReadAloudController", "rescue: playback not draining (ahead=${now}ms) - feeding anyway"); break }
+                        }
                         val sentence = text.substring(range)
+                        Log.i("ReadAloudController", "rescue: synth at ${range.first} (${sentence.length} chars)")
                         var pcm: ByteArray? = null
                         var sr = 0
                         for (attempt in 0..1) {
@@ -767,7 +778,7 @@ class ReadAloudController(
                             pcm = null
                         }
                         val audio = pcm
-                        if (audio == null) { skippedTo = range.last + 1; continue }
+                        if (audio == null) { Log.w("ReadAloudController", "rescue: local synth failed at ${range.first}, skipping"); skippedTo = range.last + 1; continue }
                         synchronized(feedLock) {
                             if (!isCurrent()) return@synchronized
                             localSpoken.add(sentence)
