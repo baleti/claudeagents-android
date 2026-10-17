@@ -2,7 +2,11 @@ package dev.local.claudeagents
 
 import android.content.Context
 import android.graphics.Typeface
+import android.text.Editable
+import android.text.Selection
 import android.text.TextUtils
+import android.text.TextWatcher
+import android.widget.EditText
 import android.view.View
 import android.view.ViewGroup
 import android.widget.BaseAdapter
@@ -125,6 +129,60 @@ object QueryDsl {
         "rv" to "rv", "reverse" to "rv"
     )
 
+    /**
+     * Quote auto-pairing (query-dsl.md "Quoted terms"): [t] is the box text right after one character was
+     * typed, [prev] the text before it, [caret] the index after the typed character. A typed `"` after a
+     * word wraps that word (`5"` -> `"5"`), on an empty spot inserts the pair, before a word wraps it, and
+     * over an existing closing quote steps past it; `'` only pairs where it could open a quote.
+     * Returns the new text and caret, or null to leave the text alone.
+     */
+    fun autoPair(prev: String, t: String, caret: Int): Pair<String, Int>? {
+        if (t.length != prev.length + 1) return null
+        val i = caret - 1
+        if (i < 0 || i >= t.length) return null
+        val q = t[i]
+        if (q != '"' && q != '\'') return null
+        if (t.removeRange(i, i + 1) != prev) return null
+        val before = t.getOrNull(i - 1)
+        val next = t.getOrNull(i + 1)
+        fun isSpace(c: Char?) = c == null || c.isWhitespace()
+        fun word(c: Char?) = !isSpace(c)
+        fun boundary(c: Char?) = isSpace(c) || c == ':' || c == '!'
+        val odd = t.substring(0, i).count { it == '"' } % 2 == 1
+        if (next == q && (if (q == '"') odd else word(before))) return Pair(prev, i + 1)
+        if (q == '"' && odd) return null
+        if (boundary(before) && isSpace(next)) return Pair(t.substring(0, i + 1) + q + t.substring(i + 1), i + 1)
+        if (boundary(before) && word(next)) {
+            var e = i + 1
+            while (e < t.length && !t[e].isWhitespace()) e++
+            return Pair(t.substring(0, e) + q + t.substring(e), e + 1)
+        }
+        if (q == '"' && word(before) && before != '"') {
+            var b = i
+            while (b > 0 && !boundary(t[b - 1])) b--
+            return Pair(t.substring(0, b) + '"' + t.substring(b, i) + '"' + t.substring(i + 1), i + 2)
+        }
+        return null
+    }
+
+    /** Hooks [autoPair] onto a search box. Attach before the box's own TextWatcher so that one sees the settled text. */
+    fun attachQuotePairing(input: EditText) {
+        var prev = ""
+        var busy = false
+        input.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) { prev = s?.toString() ?: "" }
+            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
+            override fun afterTextChanged(s: Editable?) {
+                if (busy || s == null) return
+                val r = autoPair(prev, s.toString(), Selection.getSelectionStart(s)) ?: return
+                busy = true
+                s.replace(0, s.length, r.first)
+                Selection.setSelection(s, r.second.coerceIn(0, s.length))
+                busy = false
+            }
+        })
+    }
+
     private data class Token(val raw: String, val isQuoted: Boolean, val spanStart: Int, val unterminated: Boolean = false, val neg: Boolean = false)
 
     // "..." is checked first at every position -- a token starting with "
@@ -218,14 +276,31 @@ object QueryDsl {
         Field.AGE -> compareBy { it.mtime }
     }
 
-    private class FilterTerm(val fields: List<Field>?, val alwaysFalse: Boolean, val value: String, val neg: Boolean = false) {
+    /** Substring containment; with [exact] (a terminated "quoted" term) the value must stand alone - no
+     *  letter/digit/underscore directly before or after it, so "5" matches 5 but not 15 or 599. */
+    private fun containsTerm(hay: String, value: String, exact: Boolean): Boolean {
+        var i = hay.indexOf(value, ignoreCase = true)
+        if (!exact || value.isEmpty()) return i >= 0
+        fun word(c: Char) = c.isLetterOrDigit() || c == '_'
+        val lead = word(value.first())
+        val trail = word(value.last())
+        while (i >= 0) {
+            val beforeOk = !lead || i == 0 || !word(hay[i - 1])
+            val afterOk = !trail || i + value.length >= hay.length || !word(hay[i + value.length])
+            if (beforeOk && afterOk) return true
+            i = hay.indexOf(value, i + 1, ignoreCase = true)
+        }
+        return false
+    }
+
+    private class FilterTerm(val fields: List<Field>?, val alwaysFalse: Boolean, val value: String, val neg: Boolean = false, val exact: Boolean = false) {
         // A negated term keeps exactly the rows its positive form drops
         // (so an unresolvable path, which matches nothing, negates to "keep").
         fun matches(row: ConversationRow): Boolean = positive(row) != neg
         private fun positive(row: ConversationRow): Boolean {
             if (alwaysFalse) return false
-            val flds = fields ?: return row.title.contains(value, ignoreCase = true)
-            return flds.any { displayValue(row, it).contains(value, ignoreCase = true) }
+            val flds = fields ?: return containsTerm(row.title, value, exact)
+            return flds.any { containsTerm(displayValue(row, it), value, exact) }
         }
     }
 
@@ -253,7 +328,7 @@ object QueryDsl {
                 // quote ("log with no closing ") is genuinely incomplete
                 // (its own contents aren't even settled yet) and stays
                 // inert until it's closed.
-                if (!(tok.isQuoted && tok.unterminated)) filterTerms.add(FilterTerm(null, false, tok.raw, tok.neg))
+                if (!(tok.isQuoted && tok.unterminated)) filterTerms.add(FilterTerm(null, false, tok.raw, tok.neg, tok.isQuoted))
                 idx += 1
                 continue
             }
@@ -268,7 +343,7 @@ object QueryDsl {
                             if (fields.isEmpty()) {
                                 filterTerms.add(FilterTerm(null, true, "", neg))
                             } else {
-                                filterTerms.add(FilterTerm(fields, false, valueTok.raw, neg))
+                                filterTerms.add(FilterTerm(fields, false, valueTok.raw, neg, valueTok.isQuoted))
                             }
                             idx += 2
                         } else {
@@ -285,10 +360,10 @@ object QueryDsl {
                                 if (fields.isEmpty()) {
                                     filterTerms.add(FilterTerm(null, true, "", neg))
                                 } else {
-                                    filterTerms.add(FilterTerm(fields, false, value, neg))
+                                    filterTerms.add(FilterTerm(fields, false, value, neg, argTok.isQuoted))
                                 }
                             } else {
-                                filterTerms.add(FilterTerm(null, false, argTok.raw, tok.neg || argTok.neg))
+                                filterTerms.add(FilterTerm(null, false, argTok.raw, tok.neg || argTok.neg, argTok.isQuoted))
                             }
                             idx += 2
                         } else {
