@@ -92,19 +92,33 @@ object SyncLogic {
             for (localId in db.listConversations().map { it.id }) {
                 if (localId !in serverIds) db.deleteConversation(localId)
             }
+            val cursors = context.getSharedPreferences("claudeagents_sync_cursors", Context.MODE_PRIVATE)
+            for (localId in cursors.all.keys) {
+                if (localId !in serverIds) cursors.edit().remove(localId).apply()
+            }
             for (c in conversations) {
                 try {
                     db.upsertConversation(c)
                     val localMax = db.getMaxLine(c.id)
-                    if (c.lineCount > localMax) {
+                    // The cached rows only cover message lines, so a
+                    // transcript whose trailing lines aren't messages
+                    // (tool results, summaries, ...) always has
+                    // lineCount > localMax and used to be refetched, empty,
+                    // every round. The cursor remembers how many physical
+                    // lines were already pulled; a shrunken transcript
+                    // (lineCount below the cursor) is refetched.
+                    val cursor = cursors.getInt(c.id, 0)
+                    if (c.lineCount > localMax && (c.lineCount != cursor || localMax == 0 && cursor == 0)) {
                         val resp = client.getMessages(c.id, localMax)
                         val msgs = RelayClient.parseMessages(resp)
                         if (msgs.isNotEmpty()) db.insertMessages(c.id, msgs)
                         db.deleteMessages(c.id, RelayClient.deadLines(resp))
+                        cursors.edit().putInt(c.id, c.lineCount).apply()
                     }
                 } catch (e: RelayException) {
                     if (e.code == 404) {
                         db.deleteConversation(c.id)
+                        cursors.edit().remove(c.id).apply()
                     }
                     Log.w(TAG, "sync: skipping ${c.id} this round: ${e.message}")
                 } catch (e: Exception) {
