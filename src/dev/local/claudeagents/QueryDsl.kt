@@ -70,7 +70,7 @@ class SuggestionRowAdapter(private val context: Context, private val data: List<
  * *parsed* by apply() (shared grammar -- their arity must still be consumed
  * correctly so they don't leak stray tokens into a following /fv) but are
  * inert here and left out of suggestions(), same precedent as the doc's
- * app-launcher entry ("shows no columns, offers /fv, /s, /rv only"). This
+ * app-launcher entry ("shows no columns, offers /fv, /s only"). This
  * is the 9th copy-pasted implementation the doc's own header describes
  * (window-search, claude-history, focus-picker, winswitch, clipboard-
  * picker, notification-picker, app-launcher/rss-reader share one
@@ -108,8 +108,7 @@ object QueryDsl {
     // the popup, matching the app-launcher precedent in the doc.
     private val ACTIVE_VERBS = listOf(
         VerbInfo("fv", "filter-value", "keep rows whose value matches (substring)"),
-        VerbInfo("s", "sort", "order rows by one field, optional asc / desc"),
-        VerbInfo("rv", "reverse", "flip the current order")
+        VerbInfo("s", "sort", "order rows by one field, optional asc / desc")
     )
 
     private data class FieldInfo(val field: Field, val description: String)
@@ -125,8 +124,7 @@ object QueryDsl {
         "ft" to "ft", "filter-type" to "ft",
         "at" to "at", "add-type" to "at",
         "rt" to "rt", "remove-type" to "rt",
-        "s" to "s", "sort" to "s",
-        "rv" to "rv", "reverse" to "rv"
+        "s" to "s", "sort" to "s"
     )
 
     /**
@@ -314,7 +312,6 @@ object QueryDsl {
         var sortInert = false
         var hasSort = false
         var sortDescending = false
-        var reverse = false
 
         var idx = 0
         while (idx < tokens.size) {
@@ -413,10 +410,6 @@ object QueryDsl {
                         sortDescending = saved[3] as Boolean
                     }
                 }
-                "rv" -> {
-                    if (!tok.neg) reverse = true
-                    idx += 1
-                }
                 else -> { // "ft" / "at" / "rt" -- parsed for correct arity, inert (fixed columns)
                     if (via != null) {
                         idx += 1
@@ -441,7 +434,6 @@ object QueryDsl {
             }
             rows = if (sortDescending) rows.sortedWith(combined.reversed()) else rows.sortedWith(combined)
         }
-        if (reverse) rows = rows.reversed()
         return rows
     }
 

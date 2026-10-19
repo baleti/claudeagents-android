@@ -566,7 +566,7 @@ class ChatActivity : Activity() {
         // Same search box/DSL filtering as MainActivity's conversation
         // list -- asked for explicitly 2026-09-11.
         val drawerSearchInput = EditText(this)
-        drawerSearchInput.hint = "Search… (/fv /s /rv, see query-dsl.md)"
+        drawerSearchInput.hint = "Search… (/fv /s, see query-dsl.md)"
         drawerSearchInput.setSingleLine(true)
         drawerSearchInput.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
         Theme.styleEditText(drawerSearchInput, this)

@@ -162,7 +162,7 @@ class ArchiveActivity : Activity() {
         // asked for explicitly ("searchbox is very important in that
         // archive view as there likely will be many more conversation that
         // you can manage") -- same query DSL as the main list.
-        searchInput.hint = "Search… (/fv /s /rv, see query-dsl.md)"
+        searchInput.hint = "Search… (/fv /s, see query-dsl.md)"
         searchInput.setSingleLine(true)
         searchInput.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
         Theme.styleEditText(searchInput, this)

@@ -27,9 +27,9 @@ object ConversationColumns {
     const val tokens = 46
     const val ago = 40
 
-    // dir_key ("claude"/"claude2"/"claude3"/"claude4"/"claude5"/"claude6", see the daemon's ACCOUNT_DIRS)
+    // dir_key ("claude"/"claude2"/"claude3"/"claude4"/"claude5"/"claude6"/"claude7", see the daemon's ACCOUNT_DIRS)
     // -> the same 1/2/3 numbering used everywhere else on this machine for
-    // the 6 accounts (the server's ~/.claude .. ~/.claude6).
+    // the 7 accounts (the server's ~/.claude .. ~/.claude7).
     fun accountNumber(dirKey: String): String = when (dirKey) {
         "claude" -> "1"
         "claude2" -> "2"
@@ -37,6 +37,7 @@ object ConversationColumns {
         "claude4" -> "4"
         "claude5" -> "5"
         "claude6" -> "6"
+        "claude7" -> "7"
         // Genuinely unrecoverable, not a bug: ~57 of this machine's oldest
         // conversations predate the "bridge-session" transcript line the
         // daemon reads to attribute an account (confirmed live 2026-09-05
@@ -171,7 +172,7 @@ class ConversationAdapter(
         }
 
         val c = items[position]
-        val isKnownAccount = c.account in setOf("claude", "claude2", "claude3", "claude4", "claude5", "claude6")
+        val isKnownAccount = c.account in setOf("claude", "claude2", "claude3", "claude4", "claude5", "claude6", "claude7")
         holder.account.text = ConversationColumns.accountNumber(c.account)
         holder.account.setTextColor(if (isKnownAccount) Theme.onSurfaceVariant else Theme.muted and 0x66FFFFFF.toInt())
         holder.status?.let { sv ->

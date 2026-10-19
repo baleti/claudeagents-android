@@ -395,7 +395,7 @@ class MainActivity : Activity() {
 
         // Same dir_key spelling as everywhere else in this app (see
         // ConversationColumns.accountNumber) -- the daemon's ACCOUNT_DIRS.
-        val accountKeys = listOf("claude", "claude2", "claude3", "claude4", "claude5", "claude6")
+        val accountKeys = listOf("claude", "claude2", "claude3", "claude4", "claude5", "claude6", "claude7")
         var selected = 0
         val acctButtons = mutableListOf<Button>()
         fun restyle() {
@@ -567,7 +567,7 @@ class MainActivity : Activity() {
         // account launch points use (tmux new-session + claude under that
         // account's CLAUDE_CONFIG_DIR), via the daemon's existing
         // spawn_session()/POST /api/v1/spawn (asked for explicitly: "add
-        // options to spawn new claude1/claude2/claude3/claude4/claude5/claude6 sessions via the
+        // options to spawn new claude1/claude2/claude3/claude4/claude5/claude6/claude7 sessions via the
         // same mechanism as in .shortcuts scripts" -- couldn't read those
         // scripts directly, phone unreachable this session, so this reuses
         // the daemon's own equivalent already-built primitive instead).
@@ -592,7 +592,7 @@ class MainActivity : Activity() {
         newButtonParams.marginStart = dp(8)
         newButtonParams.gravity = Gravity.CENTER_VERTICAL
         newButton.setOnClickListener {
-            Theme.showMenu(this, newButton, listOf("claude1", "claude2", "claude3", "claude4", "claude5", "claude6"), hPadDp = 10, alignEnd = true) { picked ->
+            Theme.showMenu(this, newButton, listOf("claude1", "claude2", "claude3", "claude4", "claude5", "claude6", "claude7"), hPadDp = 10, alignEnd = true) { picked ->
                 spawnEmptySession(when (picked) { "claude1" -> "claude"; else -> picked })
             }
         }
