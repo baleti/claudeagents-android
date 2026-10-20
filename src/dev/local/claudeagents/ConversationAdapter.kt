@@ -38,6 +38,7 @@ object ConversationColumns {
         "claude5" -> "5"
         "claude6" -> "6"
         "claude7" -> "7"
+        "claude8" -> "8"
         // Genuinely unrecoverable, not a bug: ~57 of this machine's oldest
         // conversations predate the "bridge-session" transcript line the
         // daemon reads to attribute an account (confirmed live 2026-09-05
@@ -172,7 +173,7 @@ class ConversationAdapter(
         }
 
         val c = items[position]
-        val isKnownAccount = c.account in setOf("claude", "claude2", "claude3", "claude4", "claude5", "claude6", "claude7")
+        val isKnownAccount = c.account in setOf("claude", "claude2", "claude3", "claude4", "claude5", "claude6", "claude7", "claude8")
         holder.account.text = ConversationColumns.accountNumber(c.account)
         holder.account.setTextColor(if (isKnownAccount) Theme.onSurfaceVariant else Theme.muted and 0x66FFFFFF.toInt())
         holder.status?.let { sv ->
