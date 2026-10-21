@@ -684,17 +684,20 @@ class ReadAloudController(
         var serverTookOver = false
         var localEnd = 0
         var serverCursor = 0
-        val bridge = if (idx == 0 && localBridge.isUsable()) localBridge else null
+        // Every section gets the bridge (for the mid-stream "server fell behind" fallback below); only
+        // section 0 also has the speak-first-sentence-immediately thread.
+        val bridge = if (localBridge.isUsable()) localBridge else null
         val localSentences = if (bridge != null) splitLocalSentences(text) else emptyList()
+        val firstThread = idx == 0 && bridge != null
         // If the engine is ready the server skips the sentence local speaks
         // first; if it is still warming up the server gets the whole text
         // (and any of its sentences local already covered are dropped).
-        val readyNow = bridge?.isReady() == true
+        val readyNow = firstThread && bridge?.isReady() == true
         val wsOffset = if (readyNow) (localSentences.firstOrNull()?.last?.plus(1) ?: 0) else 0
         serverCursor = wsOffset
         val sectionFinished = java.util.concurrent.atomic.AtomicBoolean(false)
 
-        if (bridge != null && localSentences.isNotEmpty()) {
+        if (firstThread && bridge != null && localSentences.isNotEmpty()) {
             Thread {
                 if (!readyNow && !bridge.awaitReady(15000)) return@Thread
                 for ((i, range) in localSentences.withIndex()) {
@@ -742,7 +745,7 @@ class ReadAloudController(
         fun startRescue(why: String) {
             if (doneReceived || !isCurrent()) return
             notifyFallback(why)
-            if (!(serverTookOver || localSentences.isEmpty())) return // the first local thread still covers it
+            if (firstThread && !serverTookOver && localSentences.isNotEmpty()) return // the first local thread still covers it
             if (!rescueStarted.compareAndSet(false, true)) return
             Log.w("ReadAloudController", "server stream failed ($why): on-device TTS takes over")
             Thread {
@@ -797,6 +800,42 @@ class ReadAloudController(
                     }
                 }
             }.apply { isDaemon = true; name = "ReadAloudRescue"; start() }
+        }
+
+        // Mid-stream fallback, every section: once this section is live, if the server has not delivered
+        // the next sentence and the audio buffer is nearly spent (Chatterbox queued behind other jobs, cold
+        // model, slow link), speak that sentence on-device instead of pausing. Server sentences local already
+        // covered are dropped by the localEnd check in onBinary, and the server takes over again by itself
+        // the moment it delivers one past localEnd - i.e. only once it has demonstrably caught up.
+        if (bridge != null && localSentences.isNotEmpty()) {
+            Thread {
+                var lowTicks = 0
+                while (isCurrent() && !sectionFinished.get() && !rescueStarted.get()) {
+                    Thread.sleep(150)
+                    val serverDone = synchronized(session) { session.done }
+                    if (serverDone) return@Thread
+                    val starved = session.live && (idx != 0 || serverTookOver) && svc.isPlaying() && svc.bufferedAheadMs() <= 900
+                    lowTicks = if (starved) lowTicks + 1 else 0
+                    if (lowTicks < 2) continue // debounce: also lets promote() finish flushing its buffer
+                    val from = synchronized(feedLock) { maxOf(serverCursor, localEnd) }
+                    val range = localSentences.firstOrNull { it.last + 1 > from } ?: return@Thread
+                    val sentence = text.substring(range)
+                    val latch = java.util.concurrent.CountDownLatch(1)
+                    var pcm: ByteArray? = null
+                    var sr = 0
+                    bridge.synthesize(speakableForLocalTts(sentence)) { p, r -> pcm = p; sr = r; latch.countDown() }
+                    latch.await(4, java.util.concurrent.TimeUnit.SECONDS)
+                    val audio = pcm
+                    if (audio == null || sr <= 0 || audio.isEmpty()) continue // retry next tick; the server may still deliver it
+                    synchronized(feedLock) {
+                        if (!isCurrent() || maxOf(serverCursor, localEnd) >= range.last + 1) return@synchronized
+                        Log.w("ReadAloudController", "server behind in section $idx, local fallback for sentence at ${range.first}")
+                        localSpoken.add(sentence)
+                        enqueueTagged(svc, idx, sentence, estimateWordTimings(sentence, audio.size.toLong() / 2 * 1000 / sr), audio, sr)
+                        localEnd = range.last + 1
+                    }
+                }
+            }.apply { isDaemon = true; name = "ReadAloudLocalFallback"; start() }
         }
 
         Thread {
