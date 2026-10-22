@@ -370,7 +370,7 @@ object QueryDsl {
                                 sortInert = false
                                 sortChain = resolved.flatten().distinct()
                             }
-                            sortDescending = d != null && "descending".startsWith(d) && !"ascending".startsWith(d)
+                            sortDescending = d == null || "descending".startsWith(d) && !"ascending".startsWith(d)
                         }
                     }
                     idx += 1
