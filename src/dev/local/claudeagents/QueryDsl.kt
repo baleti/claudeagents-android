@@ -362,12 +362,13 @@ object QueryDsl {
                         val dirOk = d == null || (d.isNotEmpty() && ("ascending".startsWith(d) || "descending".startsWith(d)))
                         if (dirOk) {
                             hasSort = true
-                            val resolved = keys.map { resolveFields(it) }
-                            if (keys.isEmpty() || resolved.any { it.size != 1 }) {
+                            // fuzzy keys expand to every matching field, alphabetical (query-dsl.md "Keys")
+                            val resolved = keys.map { k -> resolveFields(k).sortedBy { it.fieldName } }
+                            if (keys.isEmpty() || resolved.any { it.isEmpty() }) {
                                 sortInert = true
                             } else {
                                 sortInert = false
-                                sortChain = resolved.map { it[0] }
+                                sortChain = resolved.flatten().distinct()
                             }
                             sortDescending = d != null && "descending".startsWith(d) && !"ascending".startsWith(d)
                         }
