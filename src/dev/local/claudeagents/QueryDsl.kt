@@ -108,7 +108,7 @@ object QueryDsl {
     // the popup, matching the app-launcher precedent in the doc.
     private val ACTIVE_VERBS = listOf(
         VerbInfo("fv", "filter-value", "keep rows whose value matches (substring)"),
-        VerbInfo("s", "sort", "order rows by one field, optional asc / desc")
+        VerbInfo("s", "sort", "order rows by the keys, /s/key,key/desc")
     )
 
     private data class FieldInfo(val field: Field, val description: String)
@@ -231,25 +231,28 @@ object QueryDsl {
     // literal filter term). Returns (verb, viaPath) -- viaPath is whatever
     // followed a second "/" glued onto the verb, e.g. "/fv/account" -> (fv,
     // "account"); "/sort/tokens/title" -> (s, "tokens/title").
-    private fun parseVerbToken(tok: Token): Pair<String, String?>? {
+    private data class VerbTok(val verb: String, val via: String?, val dir: String?, val bad: Boolean)
+
+    // One syntax (query-dsl.md "Grammar"): `/verb/keys[/dir]`, `//keys` for /fv.
+    // via = the keys part (comma list), dir = the third part (/s only), bad =
+    // too many parts (inert). An unrecognized /xyz is not a verb token.
+    private fun parseVerbToken(tok: Token): VerbTok? {
         if (tok.isQuoted || !tok.raw.startsWith("/")) return null
-        val rest = tok.raw.substring(1)
-        val secondSlash = rest.indexOf('/')
-        val verbPart = if (secondSlash >= 0) rest.substring(0, secondSlash) else rest
-        val via = if (secondSlash >= 0) rest.substring(secondSlash + 1) else null
-        // "//path": the empty verb slot before the via "/" defaults to /fv
-        // (query-dsl.md "Default verb")
-        val verb = (if (secondSlash >= 0 && verbPart.isEmpty()) "fv" else VERB_ALIASES[verbPart]) ?: return null
-        return verb to via
+        val parts = tok.raw.substring(1).split("/")
+        val verb = (if (parts[0].isEmpty()) (if (parts.size >= 2) "fv" else null) else VERB_ALIASES[parts[0]]) ?: return null
+        return VerbTok(verb, parts.getOrNull(1), parts.getOrNull(2), parts.size > (if (verb == "s") 3 else 2))
     }
 
-    // Each path segment is substring-matched case-insensitively against
-    // known field names; every match is unioned (an ambiguous segment acts
-    // on every field it could mean).
-    private fun resolveFields(pathSegment: String): List<Field> {
-        if (pathSegment.isEmpty()) return emptyList()
-        val needle = pathSegment.lowercase()
-        return Field.values().filter { it.fieldName.contains(needle) }
+    // Keys: a comma list; per key the field named exactly that wins alone, else every
+    // field containing it; unioned.
+    private fun resolveFields(keys: String): List<Field> {
+        val hit = linkedSetOf<Field>()
+        for (key in keys.lowercase().split(",")) {
+            if (key.isEmpty()) continue
+            val exact = Field.values().filter { it.fieldName == key }
+            hit.addAll(if (exact.isNotEmpty()) exact else Field.values().filter { it.fieldName.contains(key) })
+        }
+        return Field.values().filter { it in hit }
     }
 
     private fun isVerbArgToken(tok: Token?): Boolean = tok != null && parseVerbToken(tok) != null
@@ -329,95 +332,49 @@ object QueryDsl {
                 idx += 1
                 continue
             }
-            val (verb, via) = parsed
+            val (verb, via, dirPart, bad) = parsed
+            // keyless or malformed: inert, takes no argument ("/fv foo" is just "foo")
+            if (via == null || bad) {
+                idx += 1
+                continue
+            }
             when (verb) {
                 "fv" -> {
-                    if (via != null) {
-                        val valueTok = tokens.getOrNull(idx + 1)
-                        if (valueTok != null && !isVerbArgToken(valueTok)) {
-                            val fields = resolveFields(via)
-                            val neg = tok.neg || valueTok.neg
-                            if (fields.isEmpty()) {
-                                filterTerms.add(FilterTerm(null, true, "", neg))
-                            } else {
-                                filterTerms.add(FilterTerm(fields, false, valueTok.raw, neg, valueTok.isQuoted))
-                            }
-                            idx += 2
+                    val valueTok = tokens.getOrNull(idx + 1)
+                    if (valueTok != null && !isVerbArgToken(valueTok)) {
+                        val fields = resolveFields(via)
+                        val neg = tok.neg || valueTok.neg
+                        if (fields.isEmpty()) {
+                            filterTerms.add(FilterTerm(null, true, "", neg))
                         } else {
-                            idx += 1
+                            filterTerms.add(FilterTerm(fields, false, valueTok.raw, neg, valueTok.isQuoted))
                         }
+                        idx += 2
                     } else {
-                        val argTok = tokens.getOrNull(idx + 1)
-                        if (argTok != null && !isVerbArgToken(argTok)) {
-                            val colon = if (!argTok.isQuoted) argTok.raw.indexOf(':') else -1
-                            if (colon > 0) {
-                                val fields = resolveFields(argTok.raw.substring(0, colon))
-                                val value = argTok.raw.substring(colon + 1)
-                                val neg = tok.neg || argTok.neg
-                                if (fields.isEmpty()) {
-                                    filterTerms.add(FilterTerm(null, true, "", neg))
-                                } else {
-                                    filterTerms.add(FilterTerm(fields, false, value, neg, argTok.isQuoted))
-                                }
-                            } else {
-                                filterTerms.add(FilterTerm(null, false, argTok.raw, tok.neg || argTok.neg, argTok.isQuoted))
-                            }
-                            idx += 2
-                        } else {
-                            idx += 1
-                        }
+                        idx += 1
                     }
                 }
                 "s" -> {
-                    // "!/s" is inert (negation only means something on a row filter):
-                    // it still consumes its arguments, then the state is put back.
-                    val saved = listOf(hasSort, sortChain, sortInert, sortDescending)
-                    hasSort = true
-                    var consumed = 1
-                    val chainSegs: List<String>? = if (via != null) {
-                        via.split("/")
-                    } else {
-                        val pathTok = tokens.getOrNull(idx + 1)
-                        if (pathTok != null && !isVerbArgToken(pathTok)) {
-                            consumed = 2
-                            listOf(pathTok.raw)
-                        } else null
-                    }
-                    if (chainSegs == null || chainSegs.any { it.isEmpty() }) {
-                        sortInert = true
-                    } else {
-                        val resolved = chainSegs.map { resolveFields(it) }
-                        if (resolved.any { it.size != 1 }) {
-                            sortInert = true
-                        } else {
-                            sortChain = resolved.map { it[0] }
+                    // "!/s" is inert (negation only means something on a row filter).
+                    if (!tok.neg) {
+                        val keys = via.split(",").filter { it.isNotEmpty() }
+                        val d = dirPart?.lowercase()
+                        val dirOk = d == null || (d.isNotEmpty() && ("ascending".startsWith(d) || "descending".startsWith(d)))
+                        if (dirOk) {
+                            hasSort = true
+                            val resolved = keys.map { resolveFields(it) }
+                            if (keys.isEmpty() || resolved.any { it.size != 1 }) {
+                                sortInert = true
+                            } else {
+                                sortInert = false
+                                sortChain = resolved.map { it[0] }
+                            }
+                            sortDescending = d != null && "descending".startsWith(d) && !"ascending".startsWith(d)
                         }
                     }
-                    val dirTok = tokens.getOrNull(idx + consumed)
-                    if (dirTok != null && !isVerbArgToken(dirTok)) {
-                        val d = dirTok.raw.lowercase()
-                        if (d.isNotEmpty() && ("ascending".contains(d) || "descending".contains(d))) {
-                            sortDescending = "descending".contains(d)
-                            consumed += 1
-                        }
-                    }
-                    idx += consumed
-                    if (tok.neg) {
-                        hasSort = saved[0] as Boolean
-                        @Suppress("UNCHECKED_CAST")
-                        sortChain = saved[1] as List<Field>?
-                        sortInert = saved[2] as Boolean
-                        sortDescending = saved[3] as Boolean
-                    }
+                    idx += 1
                 }
-                else -> { // "ft" / "at" / "rt" -- parsed for correct arity, inert (fixed columns)
-                    if (via != null) {
-                        idx += 1
-                    } else {
-                        val argTok = tokens.getOrNull(idx + 1)
-                        idx += if (argTok != null && !isVerbArgToken(argTok)) 2 else 1
-                    }
-                }
+                else -> idx += 1 // "ft" / "at" / "rt" -- parsed, inert (fixed columns)
             }
         }
 
@@ -440,37 +397,14 @@ object QueryDsl {
     // --- Autocompletion (see the class doc for how this deviates from the
     // desktop pickers' Tab-gated model) ---
 
-    private fun bareVerbToken(t: Token?, names: Set<String>): Boolean =
-        t != null && !t.isQuoted && t.raw.startsWith("/") && names.contains(t.raw.substring(1))
-
-    // If `tok` is a via-form /fv token ("/fv/account") with a resolvable
-    // path, returns the resolved fields -- used to detect "the value slot
-    // right after this token is now open".
+    // If `tok` is a /fv token ("/fv/account", "//account,title") with resolvable
+    // keys, returns the resolved fields -- used to detect "the value slot right
+    // after this token is now open".
     private fun viaFvFieldsOf(tok: Token?): List<Field>? {
         if (tok == null || tok.isQuoted || !tok.raw.startsWith("/")) return null
-        val rest = tok.raw.substring(1)
-        val slash = rest.indexOf('/')
-        if (slash < 0) return null
-        val verbPart = rest.substring(0, slash)
-        if (verbPart != "fv" && verbPart != "filter-value" && verbPart.isNotEmpty()) return null
-        val fields = resolveFields(rest.substring(slash + 1))
-        return fields.ifEmpty { null }
-    }
-
-    private fun isCompleteSortPath(lastComplete: Token?, prevOfLastComplete: Token?): Boolean {
-        if (lastComplete == null || lastComplete.isQuoted) return false
-        if (!lastComplete.raw.startsWith("/")) {
-            return prevOfLastComplete != null && !prevOfLastComplete.isQuoted &&
-                (prevOfLastComplete.raw == "/s" || prevOfLastComplete.raw == "/sort") &&
-                resolveFields(lastComplete.raw).size == 1
-        }
-        val rest = lastComplete.raw.substring(1)
-        val slash = rest.indexOf('/')
-        if (slash < 0) return false
-        val verbPart = rest.substring(0, slash)
-        if (verbPart != "s" && verbPart != "sort") return false
-        val chain = rest.substring(slash + 1).split("/")
-        return chain.isNotEmpty() && chain.all { resolveFields(it).size == 1 }
+        val vt = parseVerbToken(tok) ?: return null
+        if (vt.verb != "fv" || vt.via == null || vt.bad) return null
+        return resolveFields(vt.via).ifEmpty { null }
     }
 
     private fun valueSuggestions(
@@ -500,62 +434,45 @@ object QueryDsl {
         if (tokens.isEmpty()) return emptyList()
         val current: Token? = if (trailingSpace) null else tokens.last()
         val lastComplete: Token? = if (trailingSpace) tokens.lastOrNull() else tokens.getOrNull(tokens.size - 2)
-        val prevOfLastComplete: Token? = if (trailingSpace) tokens.getOrNull(tokens.size - 2) else tokens.getOrNull(tokens.size - 3)
 
-        // Stage 1: a fresh command -- current token starts with "/", no via yet.
+        // Stage 1: a fresh command -- current token starts with "/", no second "/" yet.
         if (current != null && !current.isQuoted && current.raw.startsWith("/") && !current.raw.substring(1).contains("/")) {
             val frag = current.raw.substring(1).lowercase()
             return ACTIVE_VERBS.filter { it.short.contains(frag) }
-                .map { Suggestion("/${it.short}", "/${it.long}", it.description, "/${it.short} ") }
+                .map { Suggestion("/${it.short}", "/${it.long}", it.description, "/${it.short}/") }
         }
 
-        // Stage 2: type path -- via form being typed ("/fv/acc", "/s/tok").
+        // Stage 2: keys -- being typed after "/fv/", "//" or "/s/" (the fragment after the last comma),
+        // or the direction part of "/s/keys/<dir>".
         run {
             val t = current ?: return@run
             if (t.isQuoted || !t.raw.startsWith("/")) return@run
-            val slash = t.raw.indexOf('/', 1)
-            if (slash < 0) return@run
-            val verbPart = t.raw.substring(1, slash)
+            val parts = t.raw.substring(1).split("/")
+            if (parts.size < 2) return@run
+            val verbPart = parts[0]
             if (verbPart !in setOf("", "fv", "filter-value", "s", "sort")) return@run
-            val afterVerb = t.raw.substring(slash + 1)
-            val lastSeg = afterVerb.substringAfterLast('/')
-            val headLen = t.raw.length - lastSeg.length
-            val frag = lastSeg.lowercase()
+            val isSort = verbPart == "s" || verbPart == "sort"
+            if (parts.size == 3) {
+                if (!isSort) return@run
+                val d = parts[2].lowercase()
+                val head = t.raw.substring(0, t.raw.length - parts[2].length)
+                return listOf("asc" to "ascending", "desc" to "descending").filter { it.second.startsWith(d) }
+                    .map { Suggestion(it.first, null, "", head + it.first + " ") }
+            }
+            if (parts.size > 3) return@run
+            val frag = parts[1].substringAfterLast(',').lowercase()
+            val headLen = t.raw.length - frag.length
             return FIELD_INFO.filter { it.field.fieldName.contains(frag) }
-                .map { fi -> Suggestion(fi.field.fieldName, null, fi.description, t.raw.substring(0, headLen) + fi.field.fieldName + " ") }
-        }
-        // Stage 2: type path -- space form right after a bare verb token.
-        if (bareVerbToken(lastComplete, setOf("fv", "filter-value", "s", "sort")) &&
-            (current == null || (!current.isQuoted && !current.raw.contains(':')))
-        ) {
-            val frag = (current?.raw ?: "").lowercase()
-            return FIELD_INFO.filter { it.field.fieldName.contains(frag) }
-                .map { Suggestion(it.field.fieldName, null, it.description, "${it.field.fieldName}:") }
+                .map { fi -> Suggestion(fi.field.fieldName, null, fi.description,
+                    t.raw.substring(0, headLen) + fi.field.fieldName + (if (isSort) "" else " ")) }
         }
 
-        // Stage 3: filter value -- "/fv path:frag" (space form, glued) or
-        // "/fv/path frag" (via form, value as its own following token).
-        if (current != null && !current.isQuoted && current.raw.contains(':') &&
-            bareVerbToken(lastComplete, setOf("fv", "filter-value"))
-        ) {
-            val path = current.raw.substringBefore(':')
-            val frag = current.raw.substringAfter(':')
-            val fields = resolveFields(path)
-            if (fields.isNotEmpty()) return valueSuggestions(all, fields, frag) { v -> "$path:$v " }
-        }
+        // Stage 3: filter value -- "/fv/path frag" (value as its own following token).
         viaFvFieldsOf(lastComplete)?.let { fields ->
             if (current == null || !current.isQuoted) {
                 val frag = (current?.raw ?: "").lowercase()
                 return valueSuggestions(all, fields, frag) { v -> "$v " }
             }
-        }
-
-        // Stage 4: sort direction -- right after a complete "/s <path>" or
-        // "/s/path..." command.
-        if (isCompleteSortPath(lastComplete, prevOfLastComplete) && (current == null || !current.isQuoted)) {
-            val frag = (current?.raw ?: "").lowercase()
-            return listOf("ascending", "descending").filter { it.contains(frag) }
-                .map { Suggestion(it, null, "", "$it ") }
         }
 
         return emptyList()
