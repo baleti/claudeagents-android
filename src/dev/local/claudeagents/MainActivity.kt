@@ -552,7 +552,6 @@ class MainActivity : Activity() {
         Theme.styleEditText(searchInput, this)
         val searchParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         searchRow.addView(searchInput, searchParams)
-        QueryDsl.attachQuotePairing(searchInput)
         searchInput.addTextChangedListener(object : TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
             override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}

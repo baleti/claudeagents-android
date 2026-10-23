@@ -127,60 +127,6 @@ object QueryDsl {
         "s" to "s", "sort" to "s"
     )
 
-    /**
-     * Quote auto-pairing (query-dsl.md "Quoted terms"): [t] is the box text right after one character was
-     * typed, [prev] the text before it, [caret] the index after the typed character. A typed `"` after a
-     * word wraps that word (`5"` -> `"5"`), on an empty spot inserts the pair, before a word wraps it, and
-     * over an existing closing quote steps past it; `'` only pairs where it could open a quote.
-     * Returns the new text and caret, or null to leave the text alone.
-     */
-    fun autoPair(prev: String, t: String, caret: Int): Pair<String, Int>? {
-        if (t.length != prev.length + 1) return null
-        val i = caret - 1
-        if (i < 0 || i >= t.length) return null
-        val q = t[i]
-        if (q != '"' && q != '\'') return null
-        if (t.removeRange(i, i + 1) != prev) return null
-        val before = t.getOrNull(i - 1)
-        val next = t.getOrNull(i + 1)
-        fun isSpace(c: Char?) = c == null || c.isWhitespace()
-        fun word(c: Char?) = !isSpace(c)
-        fun boundary(c: Char?) = isSpace(c) || c == ':' || c == '!'
-        val odd = t.substring(0, i).count { it == '"' } % 2 == 1
-        if (next == q && (if (q == '"') odd else word(before))) return Pair(prev, i + 1)
-        if (q == '"' && odd) return null
-        if (boundary(before) && isSpace(next)) return Pair(t.substring(0, i + 1) + q + t.substring(i + 1), i + 1)
-        if (boundary(before) && word(next)) {
-            var e = i + 1
-            while (e < t.length && !t[e].isWhitespace()) e++
-            return Pair(t.substring(0, e) + q + t.substring(e), e + 1)
-        }
-        if (q == '"' && word(before) && before != '"') {
-            var b = i
-            while (b > 0 && !boundary(t[b - 1])) b--
-            return Pair(t.substring(0, b) + '"' + t.substring(b, i) + '"' + t.substring(i + 1), i + 2)
-        }
-        return null
-    }
-
-    /** Hooks [autoPair] onto a search box. Attach before the box's own TextWatcher so that one sees the settled text. */
-    fun attachQuotePairing(input: EditText) {
-        var prev = ""
-        var busy = false
-        input.addTextChangedListener(object : TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) { prev = s?.toString() ?: "" }
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-            override fun afterTextChanged(s: Editable?) {
-                if (busy || s == null) return
-                val r = autoPair(prev, s.toString(), Selection.getSelectionStart(s)) ?: return
-                busy = true
-                s.replace(0, s.length, r.first)
-                Selection.setSelection(s, r.second.coerceIn(0, s.length))
-                busy = false
-            }
-        })
-    }
-
     private data class Token(val raw: String, val isQuoted: Boolean, val spanStart: Int, val unterminated: Boolean = false, val neg: Boolean = false)
 
     // "..." is checked first at every position -- a token starting with "
