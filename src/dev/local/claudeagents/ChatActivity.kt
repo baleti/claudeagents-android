@@ -112,6 +112,8 @@ class ChatActivity : Activity() {
     // readAloudFrom().
     private var readAloudSectionRowIds: List<String> = emptyList()
     private var readAloudSentence: IntRange? = null
+    // Per section: how the spoken text maps back onto the displayed text.
+    private var readAloudSectionSpoken: List<SpokenText> = emptyList()
     // Auto-follow stands down for a few seconds after the user touches the
     // screen, so reading along never fights a manual scroll.
     @Volatile private var lastUserTouchMs = 0L
@@ -336,15 +338,15 @@ class ChatActivity : Activity() {
             onSentenceHighlight = { sectionIndex, charStart, charEnd ->
                 val rowId = readAloudSectionRowIds.getOrNull(sectionIndex)
                 if (rowId != null && charEnd > charStart) {
-                    readAloudSentence = charStart..(charEnd - 1)
+                    readAloudSentence = layoutRange(sectionIndex, charStart, charEnd)
                     adapter.setHighlight(rowId, readAloudSentence, null)
                     // Follow along, unless the user is scrolling around.
-                    if (System.currentTimeMillis() - lastUserTouchMs > 5000) adapter.scrollToOffset(rowId, charStart, force = false)
+                    if (System.currentTimeMillis() - lastUserTouchMs > 5000) adapter.scrollToOffset(rowId, readAloudSentence?.first ?: charStart, force = false)
                 }
             },
             onWordHighlight = { sectionIndex, charStart, charEnd ->
                 val rowId = readAloudSectionRowIds.getOrNull(sectionIndex)
-                if (charEnd > charStart) adapter.setHighlight(rowId, readAloudSentence, charStart..(charEnd - 1))
+                if (charEnd > charStart) adapter.setHighlight(rowId, readAloudSentence, layoutRange(sectionIndex, charStart, charEnd))
             },
             onGenerating = { generating, estimatedMs ->
                 if (generating) synthBanner.start(estimatedMs) else synthBanner.stop()
@@ -380,7 +382,7 @@ class ChatActivity : Activity() {
             onLocate = {
                 lastUserTouchMs = 0
                 val rowId = readAloudSectionRowIds.getOrNull(readAloud.getPlayingSectionIndex())
-                if (rowId != null) adapter.scrollToOffset(rowId, readAloud.getPlayingSentenceStart().coerceAtLeast(0), force = true)
+                if (rowId != null) adapter.scrollToOffset(rowId, layoutIndexOf(readAloud.getPlayingSectionIndex(), readAloud.getPlayingSentenceStart().coerceAtLeast(0)), force = true)
             },
             getPosition = { readAloud.getPositionMs() },
             getDuration = { readAloud.getDurationMs() },
@@ -1340,6 +1342,8 @@ class ChatActivity : Activity() {
             }
         if (rows.isEmpty()) return
         readAloudSectionRowIds = rows.map { it.id!! }
+        val spoken = rows.map(::spokenFor)
+        readAloudSectionSpoken = spoken
         // live = true -- this conversation's tmux pane can keep producing
         // new messages for as long as it stays open (Claude still working,
         // or the user sending more while it reads), so Read Aloud should
@@ -1347,7 +1351,7 @@ class ChatActivity : Activity() {
         // up to whatever existed when play was pressed. See
         // extendReadAloudIfActive(), called from loadCached() whenever a
         // poll brings in new rows.
-        readAloud.start(intent.getStringExtra("title") ?: sessionId, rows.map(::ttsTextFor), live = true, conversationId = sessionId)
+        readAloud.start(intent.getStringExtra("title") ?: sessionId, spoken.map { it.text }, live = true, conversationId = sessionId)
     }
 
     // The rendered, markdown-stripped plain text for a row, when its
@@ -1359,8 +1363,22 @@ class ChatActivity : Activity() {
     // SEPARATELY-rendered version meant the two almost never agreed).
     // Falls back to the raw source for anything more complex (a table) --
     // still gets read aloud, just without a highlight.
-    private fun ttsTextFor(row: ChatDisplayRow): String =
-        adapter.speechLayoutFor(row)?.text ?: row.text
+    private fun spokenFor(row: ChatDisplayRow): SpokenText {
+        val layout = adapter.speechLayoutFor(row)
+        // Tables/odd rows without a layout are sent as-is (identity map).
+        return if (layout != null) Markdown.spokenText(layout)
+        else SpokenText(row.text, IntArray(row.text.length + 1) { it })
+    }
+
+    /** A range reported against section [sec]'s spoken text, in displayed-text coordinates. */
+    private fun layoutRange(sec: Int, start: Int, endExclusive: Int): IntRange {
+        val sp = readAloudSectionSpoken.getOrNull(sec) ?: return start..(endExclusive - 1)
+        val r = sp.layoutRange(start, endExclusive)
+        return r.first..maxOf(r.first, r.last)
+    }
+
+    private fun layoutIndexOf(sec: Int, spokenIdx: Int): Int =
+        readAloudSectionSpoken.getOrNull(sec)?.layoutIndex(spokenIdx) ?: spokenIdx
 
     /** Feeds any newly-synced messages after the last one Read Aloud
      * already knows about into the running session, if one is active --
@@ -1388,7 +1406,9 @@ class ChatActivity : Activity() {
             }
         if (newRows.isEmpty()) return
         readAloudSectionRowIds = readAloudSectionRowIds + newRows.map { it.id!! }
-        readAloud.appendSections(newRows.map(::ttsTextFor))
+        val spoken = newRows.map(::spokenFor)
+        readAloudSectionSpoken = readAloudSectionSpoken + spoken
+        readAloud.appendSections(spoken.map { it.text })
     }
 
     private var everLoaded = false

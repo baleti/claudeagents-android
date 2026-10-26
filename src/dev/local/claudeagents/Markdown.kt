@@ -2,6 +2,7 @@ package dev.local.claudeagents
 
 import android.graphics.Typeface
 import android.text.SpannableStringBuilder
+import android.text.Spanned
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -21,6 +22,24 @@ class SpeechPart(val start: Int, val end: Int, val seg: MdSegment)
  * [text] can be mapped back onto the right on-screen TextView. [parts] are
  * in view order (empty text blocks, which render no view, are left out). */
 class SpeechLayout(val text: String, val parts: List<SpeechPart>)
+
+/** Marks the last character of a heading or list item in the rendered
+ * text: where the spoken version must end a sentence, since the visual
+ * line break carries no punctuation for the TTS to pause on. */
+object SpeechBreak
+
+/** What is actually sent to the TTS for a message: [text] is the layout
+ * text with sentence stops added after headings/list items and list
+ * markers made speakable; [toLayout] maps each index of [text] (0..length)
+ * back to the layout text, so highlight ranges still land on screen. */
+class SpokenText(val text: String, private val toLayout: IntArray) {
+    fun layoutIndex(i: Int) = toLayout[i.coerceIn(0, toLayout.size - 1)]
+    fun layoutRange(start: Int, endExclusive: Int): IntRange {
+        val a = layoutIndex(start)
+        val b = if (endExclusive > start) layoutIndex(endExclusive - 1) + 1 else a
+        return a until b
+    }
+}
 
 sealed class MdSegment {
     data class Text(val spanned: SpannableStringBuilder) : MdSegment()
@@ -90,6 +109,61 @@ object Markdown {
             parts.add(SpeechPart(start, sb.length, seg))
         }
         return SpeechLayout(sb.toString(), parts)
+    }
+
+    private val numberedRe = Regex("^( *)(\\d{1,3})[.)] +")
+
+    fun spokenText(layout: SpeechLayout): SpokenText {
+        val src = layout.text
+        val breakAt = HashSet<Int>() // layout indices just AFTER a heading/item
+        for (part in layout.parts) {
+            val seg = part.seg as? MdSegment.Text ?: continue
+            for (sp in seg.spanned.getSpans(0, seg.spanned.length, SpeechBreak::class.java)) {
+                breakAt.add(part.start + seg.spanned.getSpanEnd(sp))
+            }
+        }
+        val out = StringBuilder()
+        val map = ArrayList<Int>()
+        fun emit(c: Char, srcIdx: Int) { out.append(c); map.add(srcIdx) }
+        var lineStart = 0
+        while (lineStart <= src.length) {
+            var lineEnd = src.indexOf('\n', lineStart)
+            if (lineEnd < 0) lineEnd = src.length
+            var i = lineStart
+            // List markers: bullets are dropped, "3." / "3)" become "3,"
+            // so the number is not mistaken for the end of a sentence.
+            val trimmed = src.substring(lineStart, lineEnd)
+            val indent = trimmed.length - trimmed.trimStart().length
+            val rest = trimmed.trimStart()
+            val num = numberedRe.find(trimmed)
+            var itemLine = false
+            if (rest.isNotEmpty() && rest[0] in "\u2022\u2610\u2611") {
+                i = lineStart + indent + 1
+                while (i < lineEnd && src[i] == ' ') i++
+                itemLine = true
+            } else if (num != null) {
+                val digits = num.groupValues[2]
+                val dStart = lineStart + num.groupValues[1].length
+                for (k in digits.indices) emit(digits[k], dStart + k)
+                emit(',', dStart + digits.length)
+                emit(' ', dStart + digits.length)
+                i = lineStart + num.value.length
+                itemLine = true
+            }
+            while (i < lineEnd) { emit(src[i], i); i++ }
+            if (lineEnd in breakAt || itemLine) {
+                // Close the line with a full stop (a trailing colon, comma
+                // or semicolon becomes one) unless it already ends a sentence.
+                var last = out.length - 1
+                while (last >= 0 && out[last] == ' ') last--
+                if (last >= 0 && out[last] in ":;,") out.setCharAt(last, '.')
+                else if (last >= 0 && out[last] !in ".!?") { out.insert(last + 1, '.'); map.add(last + 1, map[last] + 1) }
+            }
+            if (lineEnd < src.length) emit('\n', lineEnd)
+            lineStart = lineEnd + 1
+        }
+        map.add(src.length)
+        return SpokenText(out.toString(), map.toIntArray())
     }
 
     fun singleSegmentPlainText(text: String, dimColor: Int): String? {
@@ -205,6 +279,7 @@ object Markdown {
                     else if (body.startsWith("[x] ") || body.startsWith("[X] ")) { marker = "\u2611 "; body = body.substring(4) }
                     textBuf.append(m.groupValues[1]).append(marker)
                     appendInline(textBuf, body)
+                    if (textBuf.length > 0) textBuf.setSpan(SpeechBreak, textBuf.length - 1, textBuf.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
                     isProseLine = false
                 }
                 else -> {
@@ -243,6 +318,7 @@ object Markdown {
         out.setSpan(StyleSpan(Typeface.BOLD), start, out.length, 0)
         val size = when (level) { 1 -> 1.4f; 2 -> 1.25f; 3 -> 1.12f; else -> 1.0f }
         if (size != 1.0f) out.setSpan(RelativeSizeSpan(size), start, out.length, 0)
+        if (out.length > start) out.setSpan(SpeechBreak, out.length - 1, out.length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
     }
 
     private fun appendDim(out: SpannableStringBuilder, text: String, dimColor: Int) {
