@@ -138,6 +138,11 @@ class TtsPlaybackService : Service() {
     // so it's the only thing that reliably knows.
     @Volatile private var hasActiveSession = false
     @Volatile private var stopRequested = false
+    // Bumped by every startSession(): a play thread left over from the
+    // previous session (blocked in write() on the stopped track, or just
+    // about to exit) must never be mistaken for the new session's thread,
+    // or a read started while another was playing silently never plays.
+    @Volatile private var playThreadGen = 0
     @Volatile private var idleSignaled = true
     // Distinguishes "nothing left to play right now because the network is
     // still generating the next sentence" from "nothing left because there
@@ -287,6 +292,9 @@ class TtsPlaybackService : Service() {
 
     fun startSession(title: String, conversationId: String? = null) {
         sessionGeneration++ // invalidate any onQueueIdle already queued from a stop before this
+        playThreadGen++ // retire the previous session's play thread; ensurePlayThread starts a fresh one
+        audioTrack?.let { try { it.release() } catch (_: Exception) {} }
+        audioTrack = null
         hasActiveSession = true
         requestAudioFocus()
         currentTitle = title
@@ -527,20 +535,24 @@ class TtsPlaybackService : Service() {
         mainHandler.post { if (sessionGeneration == myGen) listeners.forEach { it.onQueueIdle() } }
     }
 
+    private var playThreadStartedGen = -1
+
     private fun ensurePlayThread() {
-        if (playThread?.isAlive == true) return
+        val gen = playThreadGen
+        if (playThread?.isAlive == true && playThreadStartedGen == gen) return
+        playThreadStartedGen = gen
         setPlaying(true)
         playThread = Thread {
             try {
-                playLoop()
+                playLoop(gen)
             } catch (e: Throwable) {
                 Log.e(TAG, "playLoop crashed", e)
             }
         }.apply { isDaemon = true; name = "TtsPlayback"; start() }
     }
 
-    private fun playLoop() {
-        while (!stopRequested) {
+    private fun playLoop(gen: Int) {
+        while (!stopRequested && gen == playThreadGen) {
             val myGeneration = seekGeneration
             var index: Int
             var startOffsetMs: Long
@@ -656,7 +668,7 @@ class TtsPlaybackService : Service() {
             // estimates, not a forced alignment (see docs/design.md).
             val bytesPerMs = current.sampleRate * 2 / 1000
             var offset = ((startOffsetMs * bytesPerMs).toInt()) and 1.inv() // even byte boundary for 16-bit samples
-            while (offset < current.pcm.size && !stopRequested && seekGeneration == myGeneration) {
+            while (offset < current.pcm.size && !stopRequested && gen == playThreadGen && seekGeneration == myGeneration) {
                 if (!playing) {
                     Thread.sleep(50)
                     continue
