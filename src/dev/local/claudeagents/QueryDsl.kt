@@ -226,6 +226,11 @@ object QueryDsl {
     /** Substring containment; with [exact] (a terminated "quoted" term) the value must stand alone - no
      *  letter/digit/underscore directly before or after it, so "5" matches 5 but not 15 or 599. */
     private fun containsTerm(hay: String, value: String, exact: Boolean): Boolean {
+        // An unquoted `a||b` matches when any alternative does (empty parts dropped; none left = empty needle)
+        if (!exact && value.contains("||")) {
+            val alts = value.split("||").filter { it.isNotEmpty() }
+            return alts.isEmpty() || alts.any { containsTerm(hay, it, false) }
+        }
         var i = hay.indexOf(value, ignoreCase = true)
         if (!exact || value.isEmpty()) return i >= 0
         fun word(c: Char) = c.isLetterOrDigit() || c == '_'
