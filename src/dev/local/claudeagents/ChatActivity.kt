@@ -320,7 +320,9 @@ class ChatActivity : Activity() {
                 if (active) {
                     playerBar.show()
                 } else {
-                    playerBar.hide()
+                    // Service died on its own (saved position survives only an explicit Stop): keep the bar, paused.
+                    if (ReadPositionStore.get(this, sessionId) != null) { playerBar.show(); playerBar.setPlaying(false) }
+                    else playerBar.hide()
                     adapter.setHighlight(null, null, null)
                     synthBanner.stop()
                     voiceBegun = false
@@ -333,7 +335,9 @@ class ChatActivity : Activity() {
             // highlight (the new one's sentence/word highlight follows in
             // the same tick).
             onSectionChanged = { sectionIndex ->
-                adapter.setHighlight(readAloudSectionRowIds.getOrNull(sectionIndex), null, null)
+                val rowId = readAloudSectionRowIds.getOrNull(sectionIndex)
+                adapter.setHighlight(rowId, null, null)
+                if (rowId != null) ReadPositionStore.set(this, sessionId, rowId)
             },
             onSentenceHighlight = { sectionIndex, charStart, charEnd ->
                 val rowId = readAloudSectionRowIds.getOrNull(sectionIndex)
@@ -366,14 +370,21 @@ class ChatActivity : Activity() {
                 // playerBar's own icon already reflects real playing state
                 // via onPlayingChanged above, so it's the source of truth
                 // here rather than tracking a second local flag.
-                if (playerBar.isPlayingIcon()) readAloud.pause() else readAloud.resume()
+                if (playerBar.isPlayingIcon()) readAloud.pause()
+                else if (!readAloud.isActive()) {
+                    // Session is gone (service destroyed / process killed while idle): restart from the saved message.
+                    ReadPositionStore.get(this, sessionId)?.let { readAloudFrom(it) }
+                } else readAloud.resume()
             },
             onForward = { readAloud.seekRelative(10_000) },
             onNextSection = { readAloud.skipToNextSection() },
             onSpeedClick = { anchor ->
                 SpeedPicker.show(this, anchor, readAloud.getSpeed()) { speed -> readAloud.setSpeed(speed) }
             },
-            onStop = { readAloud.stop() },
+            onStop = {
+                ReadPositionStore.clear(this, sessionId)
+                if (readAloud.isActive()) readAloud.stop() else playerBar.hide()
+            },
             // Re-scrolls to whichever message is currently being read --
             // asked for explicitly 2026-09-10. onSectionChanged above
             // already does this automatically as reading progresses, but
@@ -390,6 +401,12 @@ class ChatActivity : Activity() {
         )
         root.addView(playerBar.view)
         readAloud.bind()
+        // A read interrupted by the system (service destroyed / process killed): offer to continue it.
+        // If the service is in fact still alive, its onServiceConnected callback overrides this.
+        if (ReadPositionStore.get(this, sessionId) != null) {
+            playerBar.show()
+            playerBar.setPlaying(false)
+        }
 
         val inputRow = LinearLayout(this)
         inputRow.orientation = LinearLayout.HORIZONTAL
