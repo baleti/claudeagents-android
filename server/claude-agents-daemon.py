@@ -1059,7 +1059,10 @@ def spawn_session(dir_key, initial_text):
     # keystrokes - same fixed-delay approach send_to_pane's callers already
     # rely on elsewhere in this file, there being no readiness signal to
     # poll for that doesn't itself risk racing the first real prompt.
-    time.sleep(2)
+    if initial_text:
+        wait_for_prompt_ready(f"{tmux_session}:0.0", timeout=30)
+    else:
+        time.sleep(2)
 
     if not initial_text:
         # Empty session: nothing to prime, and Claude Code writes no
@@ -1131,6 +1134,78 @@ def _resume_lock_for(session_id):
     with _resume_locks_guard:
         return _resume_locks[session_id]
 
+_MENU_OPT_RE = re.compile(r"^\s*[❯>]?\s*(\d+)\.\s+(.*\S)")
+# (screen substring, option-label regex to choose or None for plain Enter)
+_STARTUP_PROMPTS = [
+    ("Resume this conversation?", r"^resume$"),                           # stale/huge-conversation usage warning
+    ("How would you like to continue", r"full session|as-is|original"),   # large-session resume chooser
+    ("Resume from summary", r"full session|as-is|original"),
+    ("trust the files in this folder", r"^yes"),
+    ("Do you trust", r"^yes"),
+    ("Bypass Permissions mode", r"yes, i accept|^yes"),
+    ("Press Enter to continue", None),
+    ("Press enter to continue", None),
+]
+
+
+def wait_for_prompt_ready(pane_target, timeout=60.0):
+    """Polls a freshly launched claude pane until its normal input box is
+    showing, auto-answering known startup dialogs on the way (resume
+    chooser, folder trust, bypass-permissions warning, "press Enter").
+    Replaces a blind sleep: text typed into one of those dialogs is lost or
+    answers it wrongly. Returns True when ready, False on timeout (callers
+    then fall back to sending anyway, i.e. the old behaviour)."""
+    deadline = time.time() + timeout
+    stable = 0
+    handled = {}
+    while time.time() < deadline:
+        # Only the bottom of the pane: a dismissed dialog can linger in scrollback.
+        screen = "\n".join(_pane_text(pane_target).rstrip("\n").split("\n")[-14:])
+        low = screen.lower()
+        dialog = None
+        for marker, pick in _STARTUP_PROMPTS:
+            if marker.lower() in low:
+                dialog = (marker, pick)
+                break
+        menu = any(_MENU_OPT_RE.match(l) and l.strip()[:1] in ("❯", ">") for l in screen.split("\n"))
+        if dialog or menu or "Esc to cancel" in screen or "Enter to confirm" in screen:
+            stable = 0
+            key = dialog[0] if dialog else "menu"
+            if dialog is None:
+                # Unknown dialog: never guess an answer, just keep waiting.
+                if not handled.get(key):
+                    handled[key] = 1
+                    log(f"wait_for_prompt_ready({pane_target}): unknown dialog on screen, not answering")
+            elif handled.get(key, 0) < 3:   # don't hammer a dialog we can't dismiss
+                handled[key] = handled.get(key, 0) + 1
+                pick = dialog[1]
+                try:
+                    num = None
+                    if pick:
+                        for l in screen.split("\n"):
+                            m = _MENU_OPT_RE.match(l)
+                            if m and re.search(pick, m.group(2), re.I):
+                                num = m.group(1)
+                                break
+                    log(f"startup prompt on {pane_target}: {key!r} -> {num or 'Enter'}")
+                    if num:
+                        _tmux_keys(pane_target, num)
+                        time.sleep(0.3)
+                    _tmux_keys(pane_target, "Enter")
+                except Exception as e:
+                    log(f"wait_for_prompt_ready({pane_target}): answering {key!r} failed: {e}")
+            time.sleep(1.0)
+            continue
+        if _pane_input_box_text(pane_target) is not None:
+            stable += 1
+            if stable >= 2:       # input box seen on two consecutive polls: TUI done drawing/replaying
+                return True
+        else:
+            stable = 0
+        time.sleep(0.5)
+    log(f"wait_for_prompt_ready({pane_target}): timed out after {timeout}s")
+    return False
+
 
 def resume_session(session_id, initial_text):
     """Relaunches a closed (no live tmux pane) conversation via `claude
@@ -1191,7 +1266,7 @@ def resume_session(session_id, initial_text):
         # for anything but a short conversation.
         if initial_text is None:
             return session_id, None
-        time.sleep(4)
+        wait_for_prompt_ready(f"{tmux_session}:0.0")
 
         if not send_to_pane(f"{tmux_session}:0.0", initial_text):
             log(f"resume: initial send to {tmux_session} failed for {session_id}")
