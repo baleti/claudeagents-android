@@ -998,9 +998,10 @@ class ChatActivity : Activity() {
     }
 
     private fun showChatOverflowMenu(anchor: View) {
-        Theme.showMenu(this, anchor, listOf("Restart session")) { picked ->
+        Theme.showMenu(this, anchor, listOf("Restart session", "Exit")) { picked ->
             when (picked) {
                 "Restart session" -> confirmRestartSession()
+                "Exit" -> confirmExitSession()
             }
         }
     }
@@ -1018,6 +1019,28 @@ class ChatActivity : Activity() {
             .setPositiveButton("Restart") { _, _ -> restartSession() }
             .setNegativeButton("Cancel", null)
             .show()
+    }
+
+    private fun confirmExitSession() {
+        AlertDialog.Builder(this)
+            .setTitle("Exit this session?")
+            .setMessage("Runs /exit and closes the shell window. Resume it later from the archive.")
+            .setPositiveButton("Exit") { _, _ -> exitSession() }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun exitSession() {
+        Toast.makeText(this, "Exiting session…", Toast.LENGTH_SHORT).show()
+        Thread {
+            try {
+                RelayClient(this).exit(sessionId)
+                SyncJobService.scheduleImmediate(this)
+                runOnUiThread { Toast.makeText(this, "Session exited", Toast.LENGTH_SHORT).show() }
+            } catch (e: Exception) {
+                runOnUiThread { Toast.makeText(this, "Exit failed: ${e.message}", Toast.LENGTH_LONG).show() }
+            }
+        }.apply { isDaemon = true; name = "ExitSession"; start() }
     }
 
     private fun restartSession() {

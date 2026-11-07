@@ -151,6 +151,11 @@ class RelayClient(context: Context) {
     fun restart(sessionId: String): JSONObject =
         request("POST", "/api/v1/conversations/$sessionId/restart", JSONObject(), readTimeoutMs = 25000)
 
+    // Overflow-menu "Exit": types /exit into the live pane, then closes the
+    // shell it was left in so the tmux window doesn't hang around.
+    fun exit(sessionId: String): JSONObject =
+        request("POST", "/api/v1/conversations/$sessionId/exit", JSONObject(), readTimeoutMs = 30000)
+
     // Live session: the daemon drives the TUI's own rewind picker up to its
     // confirm screen and returns that screen's options as a question (same
     // shape as AskUserQuestion), answered through answer(). No restart.
