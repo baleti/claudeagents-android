@@ -2139,10 +2139,26 @@ def conversation_meta(path, history_titles=None):
     return meta
 
 
+def _empty_live_meta(session_id, live_info):
+    """Row for a live session that has no transcript yet (just spawned, no
+    first message): Claude Code writes no jsonl until the first message, so
+    without this the list omits it and the phone's sync deletes the row."""
+    dir_key = live_info.get("dir_key")
+    info = next((v for v in ACCOUNT_MAP.values() if v["dir_key"] == dir_key), None)
+    return {
+        "id": session_id, "title": "New conversation", "mtime": time.time(),
+        "line_count": 0, "tokens": None, "context_pct": None,
+        "account": dir_key or "unknown",
+        "account_label": info["label"] if info else (dir_key or "unknown"),
+        "live": {"pane": live_info["pane"], "confidence": live_info["confidence"], "status": live_info.get("status")},
+    }
+
+
 def list_conversations(account_filter=None):
     live = get_live_sessions()
     history_titles = load_history_titles()
     out = []
+    seen_ids = set()
     for proj_dir in [d for root in PROJECTS_DIRS for d in root.iterdir() if d.is_dir()]:
         for f in proj_dir.glob("*.jsonl"):
             try:
@@ -2156,8 +2172,9 @@ def list_conversations(account_filter=None):
             # pane. Not real conversations, just noise; skip them outright
             # rather than showing an empty "(untitled)" row that goes
             # nowhere useful if tapped.
-            if meta.pop("real_messages", 0) == 0:
+            if meta.pop("real_messages", 0) == 0 and meta["id"] not in live:
                 continue
+            seen_ids.add(meta["id"])
             live_info = live.get(meta["id"])
             if live_info:
                 meta["live"] = {"pane": live_info["pane"], "confidence": live_info["confidence"], "status": live_info.get("status")}
@@ -2168,6 +2185,12 @@ def list_conversations(account_filter=None):
             if account_filter and meta["account"] != account_filter:
                 continue
             out.append(meta)
+    for sid, li in live.items():
+        if sid not in seen_ids and li.get("confidence") == "exact" and re.fullmatch(r"[0-9a-fA-F-]{36}", sid) \
+                and not PROJECTS_DIR_glob_by_id(sid):
+            m = _empty_live_meta(sid, li)
+            if not account_filter or m["account"] == account_filter:
+                out.append(m)
     out.sort(key=lambda m: m["mtime"], reverse=True)
     return out
 
@@ -2507,10 +2530,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
             # the new conversation immediately instead of waiting out a
             # full list sync.
             try:
-                meta = dict(conversation_meta(PROJECTS_DIR_glob_by_id(session_id)))
-                meta.pop("real_messages", None)
                 live = get_live_sessions().get(session_id)
-                meta["live"] = {"pane": live["pane"], "confidence": live["confidence"], "status": live.get("status")} if live else None
+                jp = PROJECTS_DIR_glob_by_id(session_id)
+                meta = dict(conversation_meta(jp)) if jp else _empty_live_meta(
+                    session_id, live or {"dir_key": account, "pane": "", "confidence": "exact"})
+                meta.pop("real_messages", None)
+                if live or jp:
+                    meta["live"] = {"pane": live["pane"], "confidence": live["confidence"], "status": live.get("status")} if live else None
+                # else: just spawned, live scan hasn't seen it yet -- keep the placeholder live marker
+                if not jp and account in ACCOUNT_DIRS:
+                    meta["account"] = account
+                    meta["account_label"] = _empty_live_meta(session_id, {"dir_key": account, "pane": "", "confidence": "exact"})["account_label"]
                 if meta.get("account") == "unknown":
                     meta["account"] = account
                 out["conversation"] = meta

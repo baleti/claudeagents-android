@@ -452,12 +452,22 @@ class MainActivity : Activity() {
         Toast.makeText(this, "Starting session…", Toast.LENGTH_SHORT).show()
         Thread {
             try {
-                val sessionId = RelayClient(this).spawn(account, "").optString("session_id", "")
+                val resp = RelayClient(this).spawn(account, "")
+                val sessionId = resp.optString("session_id", "")
                 runOnUiThread {
                     if (sessionId.isEmpty()) {
                         Toast.makeText(this, "Spawn failed: no session id returned", Toast.LENGTH_LONG).show()
                         return@runOnUiThread
                     }
+                    // Seed the row now so it is in the list on return (the
+                    // daemon also lists live empty sessions, so sync keeps it).
+                    resp.optJSONObject("conversation")?.let {
+                        try {
+                            RelayClient.parseConversations(org.json.JSONArray().put(it)).forEach { c -> db.upsertConversation(c) }
+                        } catch (e: Exception) {
+                        }
+                    }
+                    SyncJobService.scheduleImmediate(this)
                     val intent = Intent(this, ChatActivity::class.java)
                     intent.putExtra("session_id", sessionId)
                     intent.putExtra("title", "New conversation")
