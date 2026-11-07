@@ -1287,17 +1287,23 @@ _SHELL_NAMES = {"bash", "zsh", "sh", "fish", "dash", "ksh", "tcsh", "nu"}
 
 
 def exit_session(session_id):
-    """Types /exit into the conversation's live pane, then closes the shell
-    the pane was left in (a hand-started `claude` sits in a shell that would
-    otherwise hang around forever; daemon-spawned panes have no shell and
-    vanish on their own). Returns (ok, error)."""
+    """Types /exit into the conversation's live pane and returns as soon as
+    it is sent; a background thread then waits (a long conversation can take
+    a minute to quit) and closes the shell the pane was left in -- a
+    hand-started `claude` sits in a shell that would otherwise hang around
+    forever; daemon-spawned panes have no shell and vanish on their own.
+    Returns (ok, error)."""
     live = get_live_sessions().get(session_id)
     if not live:
         return True, None   # already exited: nothing to do, caller still closes its window
     pane = live["pane"]
     if not send_to_pane(pane, "/exit"):
         return False, "failed to send /exit"
+    threading.Thread(target=_close_shell_after_exit, args=(session_id, pane), daemon=True, name="ExitSession").start()
+    return True, None
 
+
+def _close_shell_after_exit(session_id, pane):
     def cur_cmd():
         try:
             r = subprocess.run(["tmux", "display-message", "-p", "-t", pane, "#{pane_current_command}"],
@@ -1306,24 +1312,21 @@ def exit_session(session_id):
         except Exception:
             return None
 
-    deadline = time.time() + 15
+    deadline = time.time() + 120
     while time.time() < deadline:
         cmd = cur_cmd()
         if cmd is None:
-            return True, None          # pane (and its tmux session) closed itself
+            return                     # pane (and its tmux session) closed itself
         if cmd in _SHELL_NAMES:
-            break
+            try:
+                _tmux_keys(pane, "C-u")
+                _tmux_keys(pane, "exit", "Enter")
+                log(f"exit_session: {session_id} exited, shell in {pane} closed")
+            except Exception as e:
+                log(f"exit_session({pane}): closing shell failed: {e}")
+            return
         time.sleep(0.5)
-    else:
-        return False, "claude did not exit"
-    try:
-        _tmux_keys(pane, "C-u")
-        _tmux_keys(pane, "exit", "Enter")
-    except Exception as e:
-        log(f"exit_session({pane}): closing shell failed: {e}")
-        return False, "claude exited but closing the shell failed"
-    log(f"exit_session: {session_id} exited, shell in {pane} closed")
-    return True, None
+    log(f"exit_session: {session_id} still running in {pane} 120s after /exit, leaving it")
 
 
 _restore_lock = threading.Lock()
