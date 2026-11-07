@@ -1293,7 +1293,7 @@ def exit_session(session_id):
     vanish on their own). Returns (ok, error)."""
     live = get_live_sessions().get(session_id)
     if not live:
-        return False, "not live"
+        return True, None   # already exited: nothing to do, caller still closes its window
     pane = live["pane"]
     if not send_to_pane(pane, "/exit"):
         return False, "failed to send /exit"

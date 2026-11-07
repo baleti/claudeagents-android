@@ -1041,6 +1041,11 @@ class ChatActivity : Activity() {
                     finish()
                 }
             } catch (e: Exception) {
+                // Older daemon builds answer 409 "not live" for a session that already exited.
+                if (e.message?.contains("not live") == true) {
+                    runOnUiThread { finish() }
+                    return@Thread
+                }
                 runOnUiThread { Toast.makeText(this, "Exit failed: ${e.message}", Toast.LENGTH_LONG).show() }
             }
         }.apply { isDaemon = true; name = "ExitSession"; start() }
