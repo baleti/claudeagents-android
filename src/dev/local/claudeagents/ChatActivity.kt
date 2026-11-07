@@ -1036,7 +1036,10 @@ class ChatActivity : Activity() {
             try {
                 RelayClient(this).exit(sessionId)
                 SyncJobService.scheduleImmediate(this)
-                runOnUiThread { Toast.makeText(this, "Session exited", Toast.LENGTH_SHORT).show() }
+                runOnUiThread {
+                    Toast.makeText(this, "Session exited", Toast.LENGTH_SHORT).show()
+                    finish()
+                }
             } catch (e: Exception) {
                 runOnUiThread { Toast.makeText(this, "Exit failed: ${e.message}", Toast.LENGTH_LONG).show() }
             }
