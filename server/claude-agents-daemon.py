@@ -79,6 +79,14 @@ for _d in [PROJECTS_DIR] + [d / "projects" for d in ACCOUNT_DIRS.values()]:
     if _d.is_dir() and _d.resolve() not in [x.resolve() for x in PROJECTS_DIRS]:
         PROJECTS_DIRS.append(_d)
 
+WEB_DIR = Path(__file__).resolve().parent / "web"
+USAGE_STATE_FILE = HOME / ".cache" / "claude-usage" / "state.json"
+# Browser session cookie value: derived from the token so it needs no storage and
+# dies when the token is rotated. HttpOnly; never the token itself.
+WEB_COOKIE = "ca_session"
+WEB_STATIC = {"/": ("index.html", "text/html; charset=utf-8"),
+              "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json")}
+
 CLAUDE_PROC_RE = re.compile(r'(^|/)claude(\s|$)')
 
 _log_lock = threading.Lock()
@@ -131,6 +139,7 @@ def build_account_map():
 
 
 TOKEN = load_or_create_token()
+WEB_SESSION = hmac.new(TOKEN.encode(), b"claude-agents-web-session-v1", "sha256").hexdigest()
 ACCOUNT_MAP = build_account_map()
 log(f"account map loaded: {[(v['dir_key'], v['email']) for v in ACCOUNT_MAP.values()]}")
 
@@ -1274,10 +1283,6 @@ def resume_session(session_id, initial_text):
 
         return session_id, None
 
-
-_restore_lock = threading.Lock()
-RESTORE_BACKUP_DIR = HOME / ".cache" / "claude-agents" / "restore-backups"
-
 _SHELL_NAMES = {"bash", "zsh", "sh", "fish", "dash", "ksh", "tcsh", "nu"}
 
 
@@ -1319,6 +1324,10 @@ def exit_session(session_id):
         return False, "claude exited but closing the shell failed"
     log(f"exit_session: {session_id} exited, shell in {pane} closed")
     return True, None
+
+
+_restore_lock = threading.Lock()
+RESTORE_BACKUP_DIR = HOME / ".cache" / "claude-agents" / "restore-backups"
 
 
 def _line_is_clean_boundary(d):
@@ -2392,22 +2401,99 @@ class Handler(http.server.BaseHTTPRequestHandler):
             log(f"deny: source {ip} not in {ALLOWED_SUBNET}")
             self._reject(403, "forbidden")
             return False
-        if self.headers.get("Origin") is not None:
-            log(f"deny: Origin header present from {ip}")
-            self._reject(403, "forbidden")
-            return False
         token = self.headers.get("X-Claude-Agents-Token", "")
-        if not hmac.compare_digest(token, TOKEN):
-            log(f"deny: bad token from {ip}")
-            self._reject(401, "unauthorized")
-            return False
+        origin = self.headers.get("Origin")
+        if token:
+            # Native client (Android app): token header, and never an Origin.
+            if origin is not None:
+                log(f"deny: Origin header present from {ip}")
+                self._reject(403, "forbidden")
+                return False
+            if not hmac.compare_digest(token, TOKEN):
+                log(f"deny: bad token from {ip}")
+                self._reject(401, "unauthorized")
+                return False
+        else:
+            # Browser: HttpOnly session cookie. Cross-site requests are refused
+            # twice over: Origin (when sent) must be this very host, and every
+            # request must carry a custom header a cross-site page can't add
+            # without a CORS preflight (which we never answer).
+            if origin is not None and origin != f"http://{self.headers.get('Host', '')}":
+                log(f"deny: foreign Origin {origin!r} from {ip}")
+                self._reject(403, "forbidden")
+                return False
+            if self.headers.get("X-Requested-With") != "claude-agents-web":
+                log(f"deny: no token and no web header from {ip}")
+                self._reject(401, "unauthorized")
+                return False
+            if not hmac.compare_digest(self._cookie(WEB_COOKIE), WEB_SESSION):
+                self._reject(401, "unauthorized")
+                return False
         if rate_limited(ip, bucket, limit):
             log(f"deny: rate limited {ip} ({bucket})")
             self._reject(429, "rate limited")
             return False
         return True
 
+    def _cookie(self, name):
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            k, _, v = part.strip().partition("=")
+            if k == name:
+                return v
+        return ""
+
+    def _serve_static(self, path):
+        ent = WEB_STATIC.get(path)
+        if not ent:
+            return False
+        try:
+            body = (WEB_DIR / ent[0]).read_bytes()
+        except OSError:
+            return False
+        self.send_response(200)
+        self.send_header("Content-Type", ent[1])
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy", "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-ancestors 'none'")
+        self.end_headers()
+        self.wfile.write(body)
+        return True
+
+    def _web_login(self):
+        ip = self.client_address[0]
+        try:
+            addr = ipaddress.ip_address(ip)
+        except Exception:
+            return self._reject(403, "forbidden")
+        if (addr not in ALLOWED_SUBNET and not addr.is_loopback) or rate_limited(ip, "login", 5, 60):
+            log(f"deny: login from {ip}")
+            return self._reject(403, "forbidden")
+        origin = self.headers.get("Origin")
+        if (origin is not None and origin != f"http://{self.headers.get('Host', '')}") or self.headers.get("X-Requested-With") != "claude-agents-web":
+            return self._reject(403, "forbidden")
+        length = int(self.headers.get("Content-Length", "0"))
+        try:
+            body = json.loads(self.rfile.read(min(max(length, 0), 4096)))
+            tok = str(body.get("token", ""))
+        except Exception:
+            return self._reject(400, "bad json")
+        if not hmac.compare_digest(tok, TOKEN):
+            log(f"deny: bad web login from {ip}")
+            return self._reject(401, "unauthorized")
+        out = b'{"ok":true}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(out)))
+        self.send_header("Set-Cookie", f"{WEB_COOKIE}={WEB_SESSION}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000")
+        self.end_headers()
+        self.wfile.write(out)
+        log(f"web login ok from {ip}")
+
     def do_GET(self):
+        if urllib.parse.urlsplit(self.path).path in WEB_STATIC and self._serve_static(urllib.parse.urlsplit(self.path).path):
+            return
         if not self._security_check():
             return
         parsed = urllib.parse.urlsplit(self.path)
@@ -2418,6 +2504,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if path == "/api/v1/accounts":
             out = [{"dir_key": v["dir_key"], "label": v["label"], "email": v["email"]} for v in ACCOUNT_MAP.values()]
             return self._ok(out)
+
+        if path == "/api/v1/usage":
+            try:
+                d = json.loads(USAGE_STATE_FILE.read_text())
+            except Exception:
+                return self._ok({"accounts": [], "codex": None, "updated_at": None})
+            return self._ok({"accounts": d.get("accounts", []), "codex": d.get("codex"), "updated_at": d.get("updated_at"),
+                             "sessions": {k: [{x: v.get(x) for x in ("title", "status", "session_id", "context_tokens", "cwd")} for v in vs] for k, vs in (d.get("sessions") or {}).items()}})
 
         if path == "/api/v1/conversations":
             account = (qs.get("account") or [None])[0]
@@ -2536,6 +2630,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # sends land in a live tmux pane or a durable queue -- keep this
         # bucket tight regardless of how generous reads are, since it's the
         # one endpoint that can inject text into a session.
+        if urllib.parse.urlsplit(self.path).path == "/api/v1/web-login":
+            return self._web_login()
         if not self._security_check(bucket="send", limit=15):
             return
         parsed = urllib.parse.urlsplit(self.path)

@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#0b141a">
+<title>Claude Agents</title>
+<style>
+:root{--bg:#f0f2f5;--panel:#fff;--line:#e4e6e9;--txt:#111b21;--mut:#667781;--me:#d9fdd3;--them:#fff;--acc:#d97757;--sel:#f0f2f5;--tool:#eef0f2;--err:#fde8e8}
+@media(prefers-color-scheme:dark){:root{--bg:#0b141a;--panel:#111b21;--line:#222d34;--txt:#e9edef;--mut:#8696a0;--me:#005c4b;--them:#202c33;--sel:#2a3942;--tool:#1b262c;--err:#4a1f1f}}
+*{box-sizing:border-box}html,body{height:100%;margin:0}
+body{font:15px/1.4 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;background:var(--bg);color:var(--txt);overflow:hidden}
+#app{display:flex;height:100dvh;max-width:1600px;margin:0 auto;background:var(--panel)}
+#side{width:360px;border-right:1px solid var(--line);display:flex;flex-direction:column;min-width:0}
+#main{flex:1;display:flex;flex-direction:column;min-width:0;background:var(--bg)}
+header{display:flex;align-items:center;gap:8px;padding:10px 12px;background:var(--panel);border-bottom:1px solid var(--line);min-height:56px}
+header h1{font-size:17px;margin:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+header .sub{font-size:12px;color:var(--mut)}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer;padding:8px 10px;border-radius:8px}
+button:hover{background:var(--sel)}
+.ic{font-size:18px;line-height:1}
+#search{margin:8px 12px;padding:8px 12px;border-radius:8px;border:0;background:var(--sel);color:var(--txt);font:inherit;outline:0}
+#list{flex:1;overflow-y:auto}
+.row{display:flex;gap:12px;padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--line)}
+.row:hover,.row.on{background:var(--sel)}
+.av{flex:none;width:44px;height:44px;border-radius:50%;display:grid;place-items:center;color:#fff;font-weight:600;position:relative}
+.av.live::after{content:"";position:absolute;right:0;bottom:0;width:12px;height:12px;border-radius:50%;background:#25d366;border:2px solid var(--panel)}
+.av.busy::after{background:var(--acc)}
+.rb{flex:1;min-width:0}.r1,.r2{display:flex;gap:8px;justify-content:space-between}
+.rt{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.rm{font-size:12px;color:var(--mut);flex:none}
+.rs{font-size:13px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#msgs{flex:1;overflow-y:auto;padding:12px 8% 8px;display:flex;flex-direction:column;gap:3px}
+.b{max-width:min(78%,760px);padding:6px 10px 4px;border-radius:10px;background:var(--them);box-shadow:0 1px .5px rgba(0,0,0,.13);word-wrap:break-word;overflow-wrap:anywhere}
+.b.me{align-self:flex-end;background:var(--me);border-top-right-radius:2px}
+.b.ai{align-self:flex-start;border-top-left-radius:2px}
+.b.tool{align-self:flex-start;background:var(--tool);font-size:12.5px;color:var(--mut);max-width:min(90%,900px);cursor:pointer}
+.b.tool .tx{max-height:3.0em;overflow:hidden}.b.tool.open .tx{max-height:none}
+.b.err{align-self:center;background:var(--err)}
+.ts{font-size:11px;color:var(--mut);text-align:right;margin-top:2px}
+.tx p{margin:0 0 .5em}.tx p:last-child{margin:0}
+.tx pre{background:rgba(0,0,0,.08);padding:8px;border-radius:6px;overflow-x:auto;font:12.5px/1.4 ui-monospace,Consolas,monospace;margin:.3em 0}
+.tx code{font:12.5px ui-monospace,Consolas,monospace;background:rgba(0,0,0,.08);padding:1px 4px;border-radius:4px}.tx pre code{background:none;padding:0}
+.day{align-self:center;background:var(--them);color:var(--mut);font-size:12px;padding:3px 10px;border-radius:8px;margin:8px 0}
+#typing{padding:0 8%;height:20px;font-size:12px;color:var(--mut)}
+#ask{margin:0 8% 6px;background:var(--them);border-left:4px solid var(--acc);border-radius:8px;padding:10px 12px;display:none}
+#ask .opt{display:block;width:100%;text-align:left;margin-top:4px;background:var(--sel)}
+#bar{display:flex;gap:8px;padding:8px 10px;background:var(--panel);border-top:1px solid var(--line);align-items:flex-end}
+#inp{flex:1;resize:none;max-height:140px;padding:9px 12px;border-radius:20px;border:0;background:var(--sel);color:var(--txt);font:inherit;outline:0}
+#send{background:var(--acc);color:#fff;width:42px;height:42px;border-radius:50%;padding:0}
+#empty{margin:auto;color:var(--mut);text-align:center}
+#back{display:none}
+dialog{border:0;border-radius:14px;background:var(--panel);color:var(--txt);padding:0;width:min(440px,94vw);box-shadow:0 10px 40px rgba(0,0,0,.4)}
+dialog::backdrop{background:rgba(0,0,0,.5)}
+.dh{display:flex;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line);font-weight:600}.dh span{flex:1}
+.db{padding:12px 16px;max-height:70vh;overflow-y:auto}
+.u{margin-bottom:14px}.u .n{display:flex;justify-content:space-between;font-weight:600;margin-bottom:4px}
+.bar{height:8px;background:var(--sel);border-radius:4px;overflow:hidden;margin:3px 0}.bar i{display:block;height:100%;background:#25d366}
+.bar.w i{background:#f5a623}.bar.x i{background:#e5484d}
+.u small{color:var(--mut);font-size:12px}
+#login{position:fixed;inset:0;background:var(--bg);display:none;place-items:center;z-index:9}
+#login form{background:var(--panel);padding:24px;border-radius:14px;width:min(360px,92vw);display:flex;flex-direction:column;gap:12px}
+#login input{padding:10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--txt);font:inherit}
+#login button{background:var(--acc);color:#fff}
+#toast{position:fixed;left:50%;bottom:80px;transform:translateX(-50%);background:#222;color:#fff;padding:8px 14px;border-radius:8px;display:none;z-index:20}
+@media(max-width:800px){
+ #side{width:100%}#main{display:none}
+ body.chat #side{display:none}body.chat #main{display:flex}
+ #back{display:block}#msgs{padding:10px 8px}#typing,#ask{padding-left:8px;margin-left:8px;margin-right:8px}.b{max-width:88%}
+}
+</style>
+</head>
+<body>
+<div id="app">
+ <section id="side">
+  <header><h1>Claude Agents<div class="sub" id="hs"></div></h1>
+   <button id="bUsage" title="Usage (Ctrl+Alt+C)"><span class="ic">📊</span></button>
+   <button id="bNew" title="New chat"><span class="ic">✎</span></button></header>
+  <input id="search" placeholder="Search chats" autocomplete="off">
+  <div id="list"></div>
+ </section>
+ <section id="main">
+  <header><button id="back"><span class="ic">←</span></button><h1 id="ct">Select a chat<div class="sub" id="cs"></div></h1></header>
+  <div id="msgs"><div id="empty">Pick a conversation on the left,<br>or start a new one with ✎.</div></div>
+  <div id="typing"></div><div id="ask"></div>
+  <div id="bar"><textarea id="inp" rows="1" placeholder="Message" disabled></textarea><button id="send" disabled><span class="ic">➤</span></button></div>
+ </section>
+</div>
+<dialog id="dUsage"><div class="dh"><span>Claude usage</span><button onclick="dUsage.close()">✕</button></div><div class="db" id="usage"></div></dialog>
+<dialog id="dNew"><div class="dh"><span>New chat</span><button onclick="dNew.close()">✕</button></div><div class="db">
+ <select id="nAcc" style="width:100%;padding:8px;margin-bottom:8px"></select>
+ <textarea id="nTxt" rows="4" placeholder="First message" style="width:100%;padding:8px;border-radius:8px"></textarea>
+ <button id="nGo" style="background:var(--acc);color:#fff;margin-top:8px;width:100%">Start</button></div></dialog>
+<div id="login"><form id="lf"><b>Claude Agents</b><span class="sub" style="color:var(--mut)">Enter the pairing token</span>
+ <input id="tok" type="password" autocomplete="current-password" placeholder="token"><button>Sign in</button><span id="le" style="color:#e5484d"></span></form></div>
+<div id="toast"></div>
+<script>
+const $=id=>document.getElementById(id);
+const H={"X-Requested-With":"claude-agents-web"};
+let convs=[],cur=null,last=0,polling=0,accounts=[];
+const COL=["#d97757","#6b8afd","#2fb67c","#b05ad6","#e0a030","#e5484d","#3aa0c8","#8a8f98"];
+const colOf=a=>COL[Math.max(0,["claude","claude2","claude3","claude4","claude5","claude6","claude7","claude8"].indexOf(a))%8];
+function toast(t){const e=$("toast");e.textContent=t;e.style.display="block";setTimeout(()=>e.style.display="none",2500)}
+async function api(path,opt={}){
+ const r=await fetch("/api/v1"+path,{...opt,headers:{...H,...(opt.body?{"Content-Type":"application/json"}:{})},credentials:"same-origin"});
+ if(r.status==401){$("login").style.display="grid";throw new Error("auth")}
+ if(!r.ok)throw new Error((await r.json().catch(()=>({}))).error||r.status);
+ return r.json()}
+const esc=s=>s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+function md(t){
+ const parts=t.split(/```/);
+ return parts.map((p,i)=>{
+  if(i%2){const nl=p.indexOf("\n");return "<pre><code>"+esc(nl>=0&&nl<20&&!/\s/.test(p.slice(0,nl))?p.slice(nl+1):p)+"</code></pre>"}
+  return esc(p).split(/\n{2,}/).map(x=>x.trim()?"<p>"+x.replace(/`([^`\n]+)`/g,"<code>$1</code>").replace(/\*\*([^*\n]+)\*\*/g,"<b>$1</b>").replace(/\n/g,"<br>")+"</p>":"").join("")}).join("")}
+const hm=ts=>ts?new Date(ts).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}):"";
+function ago(e){const d=Date.now()/1000-e;if(d<60)return"now";if(d<3600)return Math.floor(d/60)+"m";if(d<86400)return Math.floor(d/3600)+"h";return Math.floor(d/86400)+"d"}
+function renderList(){
+ const q=$("search").value.toLowerCase();
+ $("list").innerHTML="";
+ convs.filter(c=>!q||(c.title||"").toLowerCase().includes(q)).forEach(c=>{
+  const d=document.createElement("div");d.className="row"+(cur&&cur.id==c.id?" on":"");
+  const st=c.live?c.live.status:null;
+  d.innerHTML=`<div class="av ${c.live?"live":""} ${st=="busy"?"busy":""}" style="background:${colOf(c.account)}">${esc((c.title||"?").trim().charAt(0).toUpperCase())}</div>
+  <div class="rb"><div class="r1"><span class="rt">${esc(c.title||"(untitled)")}</span><span class="rm">${ago(c.mtime)}</span></div>
+  <div class="r2"><span class="rs">${esc(c.account_label||c.account)}${c.context_pct!=null?" · ctx "+c.context_pct+"%":""}${st?" · "+esc(st):""}</span></div></div>`;
+  d.onclick=()=>open(c);$("list").appendChild(d)})}
+async function loadList(){try{convs=(await api("/conversations")).sort((a,b)=>b.mtime-a.mtime);renderList();$("hs").textContent=convs.filter(c=>c.live).length+" live · "+convs.length+" chats"}catch(e){}}
+function bubble(m){
+ const d=document.createElement("div");
+ const role=m.role=="user"?"me":m.role=="assistant"?"ai":m.role=="error"?"err":"tool";
+ d.className="b "+role;
+ d.innerHTML=`<div class="tx">${md(m.text)}</div><div class="ts">${hm(m.ts)}</div>`;
+ if(role=="tool")d.onclick=()=>d.classList.toggle("open");
+ d.dataset.line=m.line;return d}
+function addMsgs(ms){
+ const box=$("msgs"),atBot=box.scrollHeight-box.scrollTop-box.clientHeight<120;
+ if($("empty"))$("empty").remove();
+ ms.forEach(m=>{if(m.line>last){box.appendChild(bubble(m));last=m.line}});
+ if(atBot)box.scrollTop=box.scrollHeight}
+async function open(c){
+ cur=c;last=0;polling++;document.body.classList.add("chat");
+ $("ct").firstChild.textContent=c.title||"(untitled)";$("cs").textContent=c.account_label||"";
+ $("msgs").innerHTML="";$("inp").disabled=false;$("send").disabled=false;$("ask").style.display="none";renderList();
+ try{const r=await api(`/conversations/${c.id}/messages?since=0`);addMsgs(r.messages);$("msgs").scrollTop=$("msgs").scrollHeight}catch(e){}
+ poll(polling)}
+async function poll(gen){
+ while(gen==polling&&cur){
+  try{
+   const r=await api(`/conversations/${cur.id}/stream?since=${last}&timeout=25`);
+   if(gen!=polling)return;
+   addMsgs(r.messages||[]);
+   $("typing").textContent=r.status=="busy"?"Claude is working…":"";
+   $("cs").textContent=(cur.account_label||"")+(r.context_pct!=null?" · context "+r.context_pct+"%":"");
+   showQ(r.question);
+  }catch(e){if(e.message=="auth")return;await new Promise(r=>setTimeout(r,3000))}}}
+function showQ(q){
+ const a=$("ask");if(!q||!q.questions){a.style.display="none";return}
+ a.style.display="block";a.innerHTML="";
+ const qs=q.questions;const picked=qs.map(()=>[]);
+ qs.forEach((x,i)=>{const h=document.createElement("div");h.innerHTML="<b>"+esc(x.question||"")+"</b>";a.appendChild(h);
+  (x.options||[]).forEach(o=>{const b=document.createElement("button");b.className="opt";b.textContent=o.label||o;
+   b.onclick=async()=>{picked[i]=[o.label||o];if(qs.length==1||picked.every(p=>p.length)){
+     try{await api(`/conversations/${cur.id}/answer`,{method:"POST",body:JSON.stringify({tool_use_id:q.id,answers:picked.map(s=>({selected:s}))})});a.style.display="none"}catch(e){toast("Answer failed: "+e.message)}}else b.style.background="var(--acc)"};
+   a.appendChild(b)})});
+ const dm=document.createElement("button");dm.className="opt";dm.textContent="Dismiss";dm.onclick=async()=>{try{await api(`/conversations/${cur.id}/answer`,{method:"POST",body:JSON.stringify({tool_use_id:q.id,dismiss:true})});a.style.display="none"}catch(e){toast(e.message)}};a.appendChild(dm)}
+async function send(){
+ const t=$("inp").value.trim();if(!t||!cur)return;
+ $("inp").value="";grow();
+ try{await api(`/conversations/${cur.id}/send`,{method:"POST",body:JSON.stringify({text:t,id:crypto.randomUUID?crypto.randomUUID():String(Date.now())+Math.random()})})}
+ catch(e){toast("Send failed: "+e.message);$("inp").value=t}}
+function grow(){const i=$("inp");i.style.height="auto";i.style.height=Math.min(i.scrollHeight,140)+"px"}
+$("inp").oninput=grow;$("send").onclick=send;
+$("inp").onkeydown=e=>{if(e.key=="Enter"&&!e.shiftKey&&!e.isComposing&&innerWidth>800){e.preventDefault();send()}};
+$("search").oninput=renderList;
+$("back").onclick=()=>{document.body.classList.remove("chat");polling++;cur=null;renderList()};
+function fmtReset(s){if(!s)return"";const d=(new Date(s)-Date.now())/60000;if(d<=0)return"resets now";return d<120?"resets in "+Math.round(d)+" min":d<2880?"resets in "+Math.round(d/60)+" h":"resets in "+Math.round(d/1440)+" d"}
+const cls=p=>p>=90?"x":p>=70?"w":"";
+async function showUsage(){
+ dUsage.showModal();const el=$("usage");el.textContent="Loading…";
+ try{const u=await api("/usage");const row=(n,a,stale)=>`<div class="u"><div class="n"><span>${esc(n)}</span><small>${stale?"stale":""}</small></div>
+  <small>Session ${a.session_pct}% · ${fmtReset(a.session_resets_at)}</small><div class="bar ${cls(a.session_pct)}"><i style="width:${a.session_pct}%"></i></div>
+  <small>Week ${a.weekly_pct}% · ${fmtReset(a.weekly_resets_at)}</small><div class="bar ${cls(a.weekly_pct)}"><i style="width:${a.weekly_pct}%"></i></div></div>`;
+  el.innerHTML=(u.accounts||[]).map(a=>row(a.account,a,a.stale)).join("")+(u.codex?row("codex",u.codex,false):"")+`<small>Updated ${u.updated_at?new Date(u.updated_at).toLocaleTimeString():"?"}</small>`}
+ catch(e){el.textContent="Failed: "+e.message}}
+$("bUsage").onclick=showUsage;
+addEventListener("keydown",e=>{if(e.ctrlKey&&e.altKey&&e.key.toLowerCase()=="c"){e.preventDefault();dUsage.open?dUsage.close():showUsage()}});
+$("bNew").onclick=async()=>{try{accounts=await api("/accounts")}catch(e){return}
+ $("nAcc").innerHTML=accounts.map(a=>`<option value="${esc(a.dir_key)}">${esc(a.dir_key)} — ${esc(a.label)}</option>`).join("");dNew.showModal()};
+$("nGo").onclick=async()=>{const t=$("nTxt").value.trim();if(!t)return;$("nGo").disabled=true;
+ try{const r=await api("/spawn",{method:"POST",body:JSON.stringify({account:$("nAcc").value,text:t})});dNew.close();$("nTxt").value="";await loadList();const c=convs.find(x=>x.id==r.session_id)||r.conversation;if(c)open(c)}
+ catch(e){toast("Spawn failed: "+e.message)}$("nGo").disabled=false};
+$("lf").onsubmit=async e=>{e.preventDefault();
+ const r=await fetch("/api/v1/web-login",{method:"POST",headers:{...H,"Content-Type":"application/json"},body:JSON.stringify({token:$("tok").value.trim()}),credentials:"same-origin"});
+ if(r.ok){$("login").style.display="none";$("tok").value="";start()}else $("le").textContent="Wrong token"};
+async function start(){await loadList();setInterval(()=>{if(!document.hidden)loadList()},10000)}
+(async()=>{
+ const m=location.hash.match(/token=([0-9a-f]+)/);
+ if(m){history.replaceState(null,"",location.pathname);
+  await fetch("/api/v1/web-login",{method:"POST",headers:{...H,"Content-Type":"application/json"},body:JSON.stringify({token:m[1]}),credentials:"same-origin"})}
+ start()})();
+</script>
+</body>
+</html>
