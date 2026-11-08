@@ -15,6 +15,11 @@ object TtsSettings {
     private const val PREFS = "claudeagents_tts_prefs"
     private const val DEFAULT_TTS_PORT = 8792
 
+    // TTS streaming goes straight to the ai1 server on host1 (WireGuard hub 10.10.0.6:8100); the relay/daemon
+    // host stays host3 (TokenStore).
+    const val TTS_DIRECT_HOST = "10.10.0.6"
+    const val TTS_DIRECT_PORT = 8100
+
     fun getTtsPort(context: Context): Int =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getInt("tts_port", DEFAULT_TTS_PORT)
 

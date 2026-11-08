@@ -136,7 +136,7 @@ class TtsSettingsActivity : Activity() {
                 try {
                     val host = TokenStore.getHost(this).trim()
                     val port = portField.text.toString().trim().toIntOrNull() ?: return@Thread
-                    val url = java.net.URL("http://$host:$port/voices?engine=$engine")
+                    val url = java.net.URL("http://${TtsSettings.TTS_DIRECT_HOST}:${TtsSettings.TTS_DIRECT_PORT}/voices?engine=$engine")
                     val conn = url.openConnection() as java.net.HttpURLConnection
                     conn.connectTimeout = 4000
                     conn.readTimeout = 4000

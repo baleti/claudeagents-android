@@ -662,8 +662,8 @@ class ReadAloudController(
         // problem because reportPosition() only ever started from inside
         // onOpen(), already on the connection's own thread).
         val client = WebSocketClient(
-            TokenStore.getHost(context),
-            TtsSettings.getTtsPort(context),
+            TtsSettings.TTS_DIRECT_HOST,
+            TtsSettings.TTS_DIRECT_PORT,
             "/tts/stream",
             mapOf("X-Peer-Agent" to "1"),
         )
