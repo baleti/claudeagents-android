@@ -682,6 +682,7 @@ class ReadAloudController(
         // newsdigest-android's ReadAloudController.streamText().
         val feedLock = Any()
         var serverTookOver = false
+        var serverGotAny = false // server audio has arrived: stop over-buffering local
         var localEnd = 0
         var serverCursor = 0
         // Every section gets the bridge (for the mid-stream "server fell behind" fallback below); only
@@ -702,7 +703,7 @@ class ReadAloudController(
                 if (!readyNow && !bridge.awaitReady(15000)) return@Thread
                 for ((i, range) in localSentences.withIndex()) {
                     if (!isCurrent() || serverTookOver) return@Thread
-                    while (i > 0 && isCurrent() && !serverTookOver && svc.bufferedAheadMs() > 700) Thread.sleep(100)
+                    while (i > 0 && isCurrent() && !serverTookOver && svc.bufferedAheadMs() > (if (serverGotAny) 1500L else 8_000L)) Thread.sleep(100)
                     if (!isCurrent() || serverTookOver) return@Thread
                     val sentence = text.substring(range)
                     val latch = java.util.concurrent.CountDownLatch(1)
@@ -762,7 +763,7 @@ class ReadAloudController(
                         // network drop, focus loss that never returned) the buffer never shrinks and the rescue
                         // would sit here silently. If it has not shrunk for 6s, carry on and feed the next sentence.
                         var lastAhead = svc.bufferedAheadMs(); var stuckMs = 0
-                        while (isCurrent() && svc.bufferedAheadMs() > 700) {
+                        while (isCurrent() && svc.bufferedAheadMs() > 20_000L) {
                             Thread.sleep(100)
                             val now = svc.bufferedAheadMs()
                             if (now < lastAhead) { stuckMs = 0 } else stuckMs += 100
@@ -814,7 +815,7 @@ class ReadAloudController(
                     Thread.sleep(150)
                     val serverDone = synchronized(session) { session.done }
                     if (serverDone) return@Thread
-                    val starved = session.live && (idx != 0 || serverTookOver) && svc.isPlaying() && svc.bufferedAheadMs() <= 900
+                    val starved = session.live && (idx != 0 || serverTookOver) && svc.isPlaying() && svc.bufferedAheadMs() <= 2500
                     lowTicks = if (starved) lowTicks + 1 else 0
                     if (lowTicks < 2) continue // debounce: also lets promote() finish flushing its buffer
                     val from = synchronized(feedLock) { maxOf(serverCursor, localEnd) }
@@ -902,9 +903,19 @@ class ReadAloudController(
                     // drop the server's copy; otherwise the server has
                     // caught up, so local stops for good.
                     synchronized(feedLock) {
-                        val at = text.indexOf(sentenceText, serverCursor)
-                        if (at >= 0) serverCursor = at + sentenceText.length
-                        if (localSentences.isNotEmpty() && at >= 0 && at + sentenceText.length <= localEnd) return
+                        serverGotAny = true
+                        // Locate the sentence in the source text; the server may normalise it, so fall back to its head,
+                        // then to "right after the cursor". Unlocatable sentences used to be spoken twice.
+                        val trimmed = sentenceText.trim()
+                        var at = text.indexOf(sentenceText, serverCursor)
+                        var len = sentenceText.length
+                        if (at < 0) { at = text.indexOf(trimmed, serverCursor); len = trimmed.length }
+                        if (at < 0 && trimmed.length > 12) { at = text.indexOf(trimmed.take(12), serverCursor); len = trimmed.length }
+                        if (at < 0) { at = serverCursor; len = trimmed.length }
+                        serverCursor = maxOf(serverCursor, at + len)
+                        // Local covers everything before localEnd: drop any server sentence STARTING before it
+                        // (a straddling one included) - a repeat is worse than a missing half-sentence.
+                        if (localSentences.isNotEmpty() && at < localEnd) return
                         serverTookOver = true
                     }
 
