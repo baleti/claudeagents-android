@@ -6,8 +6,8 @@ equivalent) only.
 Security model:
   - socket bound to the tunnel interface IP only, never 0.0.0.0
   - peer IP must be in ALLOWED_SUBNET
-  - X-Claude-Agents-Token header must match the on-disk token (constant-time)
-  - any Origin header -> reject (no browser caller has legitimate business)
+  - NO token auth (removed 2026-11-07): any peer on the WireGuard subnet may connect
+  - an Origin header that is not this host -> reject (cross-site protection)
   - no CORS headers, ever
   - naive per-IP rate limit on mutating endpoints
   - token itself is never logged
@@ -81,11 +81,29 @@ for _d in [PROJECTS_DIR] + [d / "projects" for d in ACCOUNT_DIRS.values()]:
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 USAGE_STATE_FILE = HOME / ".cache" / "claude-usage" / "state.json"
-# Browser session cookie value: derived from the token so it needs no storage and
-# dies when the token is rotated. HttpOnly; never the token itself.
-WEB_COOKIE = "ca_session"
 WEB_STATIC = {"/": ("index.html", "text/html; charset=utf-8"),
               "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json")}
+# The shared picker-query engine (the same file the quickshell panels import), served to the web page so its search
+# box parses exactly the DSL of the Ctrl+Alt+C panel. See _serve_dsl.
+DSL_JS = HOME / ".config" / "quickshell" / "lib" / "dsl.js"
+CLAUDE_HISTORY = HOME / "bin" / "claude-history"
+_fts_cache = {}      # query -> (time, {session_id: score}); `/fts` answers from claude-history are reused for a minute
+CLAUDE_INDEX_META = HOME / ".cache" / "indexes" / "claude" / "meta.json"   # sid -> {title, cwd, msgs, tokens, mtime}, kept by claude-fts-index
+_claude_meta_cache = {"mtime": None, "value": {}}
+
+
+def _claude_index_meta():
+    """The desktop index's per-conversation metadata, re-read only when the file changes; {} if it is missing or broken."""
+    try:
+        m = CLAUDE_INDEX_META.stat().st_mtime
+    except OSError:
+        return {}
+    if m != _claude_meta_cache["mtime"]:
+        try:
+            _claude_meta_cache.update(mtime=m, value=json.loads(CLAUDE_INDEX_META.read_text()))
+        except (OSError, ValueError):
+            return {}
+    return _claude_meta_cache["value"]
 
 CLAUDE_PROC_RE = re.compile(r'(^|/)claude(\s|$)')
 
@@ -139,7 +157,6 @@ def build_account_map():
 
 
 TOKEN = load_or_create_token()
-WEB_SESSION = hmac.new(TOKEN.encode(), b"claude-agents-web-session-v1", "sha256").hexdigest()
 ACCOUNT_MAP = build_account_map()
 log(f"account map loaded: {[(v['dir_key'], v['email']) for v in ACCOUNT_MAP.values()]}")
 
@@ -826,6 +843,10 @@ def deliver_text_to_conversation(session_id, text, msg_id, ip, log_prefix="send"
             replay["replayed"] = True
             return replay
 
+    pend = PENDING_SPAWNS.get(session_id)
+    if pend is not None:
+        pend.wait(60)   # session still booting (background spawn): hold the message until the TUI is ready
+
     live = get_live_sessions().get(session_id)
     if live:
         ok = send_to_pane(live["pane"], text)
@@ -1032,7 +1053,12 @@ def _maybe_open_display_window(tmux_session):
         log(f"WARN tmux session={tmux_session} could not open display window: {e}")
 
 
-def spawn_session(dir_key, initial_text):
+# session_id -> Event set once a background-started session has its first message typed in (or gave up).
+# deliver_text_to_conversation waits on it, so a message sent while the TUI is still booting is not lost.
+PENDING_SPAWNS = {}
+
+
+def spawn_session(dir_key, initial_text, background=False):
     """Starts a brand-new tmux+claude session with a caller-known session id,
     primes it with the first message, and waits until the transcript file
     exists so the caller's very next /stream call is guaranteed to find it.
@@ -1064,14 +1090,34 @@ def spawn_session(dir_key, initial_text):
 
     _maybe_open_display_window(tmux_session)
 
+    if background:
+        # Return the id as soon as the tmux session exists; booting the TUI, priming the first message and waiting for
+        # the transcript continue here in a thread. The client opens the chat straight away and its poll picks the
+        # transcript up when it appears.
+        ev = threading.Event()
+        PENDING_SPAWNS[session_id] = ev
+
+        def _finish():
+            try:
+                spawn_session_finish(session_id, tmux_session, initial_text)
+            except Exception as e:
+                log(f"spawn: background finish for {session_id} failed: {e}")
+            finally:
+                ev.set()
+                PENDING_SPAWNS.pop(session_id, None)
+        threading.Thread(target=_finish, daemon=True, name=f"spawn-{session_id[:8]}").start()
+        return session_id, None
+    return spawn_session_finish(session_id, tmux_session, initial_text)
+
+
+def spawn_session_finish(session_id, tmux_session, initial_text):
     # The TUI needs a moment to finish drawing before it can accept
     # keystrokes - same fixed-delay approach send_to_pane's callers already
     # rely on elsewhere in this file, there being no readiness signal to
     # poll for that doesn't itself risk racing the first real prompt.
-    if initial_text:
-        wait_for_prompt_ready(f"{tmux_session}:0.0", timeout=30)
-    else:
-        time.sleep(2)
+    # Wait for the real input box even with no first message: the web client lets the user type into the new chat at once,
+    # and a /send that lands while the TUI is still booting is typed into nothing (blank chat, no reply).
+    wait_for_prompt_ready(f"{tmux_session}:0.0", timeout=30)
 
     if not initial_text:
         # Empty session: nothing to prime, and Claude Code writes no
@@ -1964,6 +2010,19 @@ def parse_transcript_line(line, line_no):
     except Exception:
         return None
     t = d.get("type")
+    if t == "attachment":
+        # A message typed while Claude was mid-turn: Claude Code absorbs it into the running turn and records it as a
+        # queued_command attachment (no plain `user` line is ever written for it), so without this the follow-up
+        # never showed up in the chat at all.
+        a = d.get("attachment") or {}
+        if a.get("type") == "queued_command" and (a.get("origin") or {}).get("kind", "human") == "human":
+            p = a.get("prompt")
+            if isinstance(p, list):
+                p = summarize_content_blocks(p)
+            if isinstance(p, str) and p.strip() and not p.lstrip().startswith("<"):
+                return {"line": line_no, "role": "user", "text": p, "ts": a.get("timestamp") or d.get("timestamp"),
+                        "uuid": d.get("uuid")}
+        return None
     if t not in ("user", "assistant"):
         return None
     msg = d.get("message") or {}
@@ -2245,6 +2304,11 @@ def list_conversations(account_filter=None):
             m = _empty_live_meta(sid, li)
             if not account_filter or m["account"] == account_filter:
                 out.append(m)
+    cm = _claude_index_meta()
+    for m in out:            # message count and working directory, from the desktop's claude-fts-index (what the Ctrl+Alt+C panel shows)
+        x = cm.get(m["id"])
+        if x:
+            m["msgs"], m["cwd"] = x.get("msgs"), x.get("cwd")
     out.sort(key=lambda m: m["mtime"], reverse=True)
     return out
 
@@ -2404,46 +2468,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
             log(f"deny: source {ip} not in {ALLOWED_SUBNET}")
             self._reject(403, "forbidden")
             return False
-        token = self.headers.get("X-Claude-Agents-Token", "")
+        # No token/cookie: the WireGuard subnet check above is the only auth, by
+        # the owner's decision (2026-11-07). The Origin check below is not auth,
+        # it stops a web page open in a WG-connected browser from driving this
+        # API cross-site (browsers always send Origin on cross-origin POSTs).
         origin = self.headers.get("Origin")
-        if token:
-            # Native client (Android app): token header, and never an Origin.
-            if origin is not None:
-                log(f"deny: Origin header present from {ip}")
-                self._reject(403, "forbidden")
-                return False
-            if not hmac.compare_digest(token, TOKEN):
-                log(f"deny: bad token from {ip}")
-                self._reject(401, "unauthorized")
-                return False
-        else:
-            # Browser: HttpOnly session cookie. Cross-site requests are refused
-            # twice over: Origin (when sent) must be this very host, and every
-            # request must carry a custom header a cross-site page can't add
-            # without a CORS preflight (which we never answer).
-            if origin is not None and origin != f"http://{self.headers.get('Host', '')}":
-                log(f"deny: foreign Origin {origin!r} from {ip}")
-                self._reject(403, "forbidden")
-                return False
-            if self.headers.get("X-Requested-With") != "claude-agents-web":
-                log(f"deny: no token and no web header from {ip}")
-                self._reject(401, "unauthorized")
-                return False
-            if not hmac.compare_digest(self._cookie(WEB_COOKIE), WEB_SESSION):
-                self._reject(401, "unauthorized")
-                return False
+        if origin is not None and origin != f"http://{self.headers.get('Host', '')}":
+            log(f"deny: foreign Origin {origin!r} from {ip}")
+            self._reject(403, "forbidden")
+            return False
         if rate_limited(ip, bucket, limit):
             log(f"deny: rate limited {ip} ({bucket})")
             self._reject(429, "rate limited")
             return False
         return True
-
-    def _cookie(self, name):
-        for part in (self.headers.get("Cookie") or "").split(";"):
-            k, _, v = part.strip().partition("=")
-            if k == name:
-                return v
-        return ""
 
     def _serve_static(self, path):
         ent = WEB_STATIC.get(path)
@@ -2464,38 +2502,54 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
         return True
 
-    def _web_login(self):
-        ip = self.client_address[0]
+    def _serve_dsl(self):
+        """GET /dsl.js: the shared DSL engine (`.pragma library` QML JS) wrapped so it exposes one global, window.DSL,
+        and adds nothing else to the page. Read from the desktop's file on every request, so the web search never lags
+        behind the panels' grammar."""
         try:
-            addr = ipaddress.ip_address(ip)
-        except Exception:
-            return self._reject(403, "forbidden")
-        if (addr not in ALLOWED_SUBNET and not addr.is_loopback) or rate_limited(ip, "login", 5, 60):
-            log(f"deny: login from {ip}")
-            return self._reject(403, "forbidden")
-        origin = self.headers.get("Origin")
-        if (origin is not None and origin != f"http://{self.headers.get('Host', '')}") or self.headers.get("X-Requested-With") != "claude-agents-web":
-            return self._reject(403, "forbidden")
-        length = int(self.headers.get("Content-Length", "0"))
-        try:
-            body = json.loads(self.rfile.read(min(max(length, 0), 4096)))
-            tok = str(body.get("token", ""))
-        except Exception:
-            return self._reject(400, "bad json")
-        if not hmac.compare_digest(tok, TOKEN):
-            log(f"deny: bad web login from {ip}")
-            return self._reject(401, "unauthorized")
-        out = b'{"ok":true}'
+            src = DSL_JS.read_text()
+        except OSError:
+            return False
+        lines = src.split("\n")
+        if lines and lines[0].startswith(".pragma"):
+            lines[0] = "//"
+        body = ("window.DSL=(function(){\n" + "\n".join(lines) +
+                "\nreturn {makeSchema:makeSchema,parseQuery:parseQuery,selectRows:selectRows,termMatches:termMatches,"
+                "resolveNames:resolveNames,resolveSortKeys:resolveSortKeys,substr:substr,tokenize:tokenize};})();\n").encode()
         self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(out)))
-        self.send_header("Set-Cookie", f"{WEB_COOKIE}={WEB_SESSION}; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000")
+        self.send_header("Content-Type", "application/javascript; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
-        self.wfile.write(out)
-        log(f"web login ok from {ip}")
+        self.wfile.write(body)
+        return True
+
+    def _fts_hits(self, q):
+        """session_id -> score for a full-text query over the Claude conversations (Recoll, via claude-history --fts)."""
+        now = time.time()
+        hit = _fts_cache.get(q)
+        if hit and now - hit[0] < 60:
+            return hit[1]
+        r = subprocess.run([str(CLAUDE_HISTORY), "--fts", q], capture_output=True, text=True, timeout=30)
+        out = {}
+        for line in r.stdout.splitlines():
+            sid, _, score = line.partition("\t")
+            if sid:
+                try:
+                    out[sid] = float(score)
+                except ValueError:
+                    out[sid] = 0.0
+        if len(_fts_cache) > 200:
+            _fts_cache.clear()
+        _fts_cache[q] = (now, out)
+        return out
 
     def do_GET(self):
         if urllib.parse.urlsplit(self.path).path in WEB_STATIC and self._serve_static(urllib.parse.urlsplit(self.path).path):
+            return
+        if urllib.parse.urlsplit(self.path).path == "/dsl.js" and self._serve_dsl():
             return
         if not self._security_check():
             return
@@ -2515,6 +2569,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._ok({"accounts": [], "codex": None, "updated_at": None})
             return self._ok({"accounts": d.get("accounts", []), "codex": d.get("codex"), "updated_at": d.get("updated_at"),
                              "sessions": {k: [{x: v.get(x) for x in ("title", "status", "session_id", "context_tokens", "cwd")} for v in vs] for k, vs in (d.get("sessions") or {}).items()}})
+
+        if path == "/api/v1/fts":
+            q = ((qs.get("q") or [""])[0]).strip()[:200]
+            if not q:
+                return self._ok({"q": "", "hits": {}})
+            try:
+                return self._ok({"q": q, "hits": self._fts_hits(q)})
+            except Exception as e:
+                log(f"fts failed for {q!r}: {e}")
+                return self._ok({"q": q, "hits": {}, "error": "full-text search unavailable"})
 
         if path == "/api/v1/conversations":
             account = (qs.get("account") or [None])[0]
@@ -2633,8 +2697,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
         # sends land in a live tmux pane or a durable queue -- keep this
         # bucket tight regardless of how generous reads are, since it's the
         # one endpoint that can inject text into a session.
-        if urllib.parse.urlsplit(self.path).path == "/api/v1/web-login":
-            return self._web_login()
         if not self._security_check(bucket="send", limit=15):
             return
         parsed = urllib.parse.urlsplit(self.path)
@@ -2661,7 +2723,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self._reject(400, "bad text")
             text = text.strip()[:20000]
 
-            session_id, err = spawn_session(account, text)
+            session_id, err = spawn_session(account, text, background=bool(body.get("async")))
             if err:
                 log(f"spawn: failed for {ip}: {err}")
                 return self._reject(500, err)
