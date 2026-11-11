@@ -24,7 +24,11 @@ button:hover{background:var(--sel)}
 .ic{font-size:18px;line-height:1}
 .ic svg{width:18px;height:18px;display:block}   /* the new-chat icon is an inline SVG (Lucide "square-pen", as Omnichat uses) and takes the button's colour */
 #search{margin:2px 10px 8px;padding:8px 12px;border-radius:12px;border:1px solid var(--line);background:transparent;color:var(--txt);font:inherit;font-size:14px;outline:0}
-#search:focus{border-color:var(--inpl);background:var(--bg)}
+#search:focus{border-color:var(--accent,var(--inpl));background:var(--bg)}
+#cp,#hp{position:fixed;z-index:30;display:none;max-height:260px;overflow-y:auto;background:var(--bg);border:1px solid var(--line);border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.35);padding:4px;font-size:13px}
+#cp div,#hp div{display:flex;gap:10px;padding:5px 9px;border-radius:8px;cursor:pointer;white-space:nowrap}#cp div.sel,#hp div.sel{background:var(--sel)}#hp div{max-width:min(720px,92vw)}#hp div span{overflow:hidden;text-overflow:ellipsis}#hp .hd{color:var(--mut);font-size:11px;cursor:default}
+#xp{position:fixed;z-index:31;display:none;background:var(--bg);border:1px solid var(--line);border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.35);padding:10px;width:230px;font-size:13px}#xp .q{margin-bottom:8px;line-height:1.35}#xp .q small{display:block;color:var(--mut);font-size:12px;margin-top:2px}#xp .bt{display:flex;gap:8px}#xp button{flex:1;padding:8px;border-radius:10px;border:1px solid var(--line)}#xp #xpGo{background:#e5484d;color:#fff;border-color:#e5484d}
+#cp b{font-family:"Roboto Mono",ui-monospace,Consolas,monospace;font-weight:600}#cp span{color:var(--mut);overflow:hidden;text-overflow:ellipsis}
 #list{flex:1;overflow-y:auto;padding:0 8px 8px}
 .row{display:flex;gap:10px;padding:8px 10px;cursor:pointer;border-radius:10px;align-items:center;margin-bottom:1px}
 .row:hover{background:var(--sel)}.row.on{background:var(--sel)}
@@ -36,10 +40,17 @@ button:hover{background:var(--sel)}
 .rs{font-size:12px;color:var(--mut);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.35}
 #msgs{flex:1;overflow-y:auto;padding:12px max(16px,calc((100% - 48rem)/2)) 8px;display:flex;flex-direction:column;gap:18px}
 .b{max-width:100%;word-wrap:break-word;overflow-wrap:anywhere;position:relative}
+#pics{display:none;gap:8px;flex-wrap:wrap;margin:0 max(16px,calc((100% - 48rem)/2)) 6px}#pics.on{display:flex}
+.pic{position:relative}.pic img{height:64px;max-width:120px;object-fit:cover;border-radius:10px;border:1px solid var(--line);display:block}
+.pic button{position:absolute;top:-6px;right:-6px;width:20px;height:20px;padding:0;border-radius:50%;background:var(--txt);color:var(--bg);font-size:11px;line-height:20px}
+.tw{overflow-x:auto;margin:6px 0;max-width:100%}.tw table{border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums}.tw th,.tw td{border:1px solid var(--line);padding:5px 9px;text-align:left;vertical-align:top}.tw th{background:var(--sel);font-weight:600;white-space:nowrap}
 .b.me{align-self:flex-end;max-width:min(80%,40rem);background:var(--me);border-radius:24px;padding:8px 18px}
 .b.ai{align-self:stretch;padding:0 2px}
 .b.tool{align-self:flex-start;background:var(--tool);border:1px solid var(--line);border-radius:12px;padding:6px 12px;font-size:13px;color:var(--mut);max-width:100%;cursor:pointer}
-.b.tool .tx{max-height:3.0em;overflow:hidden}.b.tool.open .tx{max-height:none}
+.b.tool .tx{display:none}.b.tool.open .tx{display:block}
+.b.tool .hl{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:"Roboto Mono",ui-monospace,Consolas,monospace;font-size:12px}.b.tool.open .hl{display:none}
+.b.tool.call{border-style:dashed}
+.b.me{cursor:pointer}.b.me.folded{opacity:.75}.b.me.folded::after{content:"▸ " attr(data-hid) " hidden";display:block;font-size:11px;color:var(--mut);margin-top:2px}
 .b.err{align-self:center;background:var(--err);border-radius:12px;padding:6px 14px}
 .ts{display:none}
 .tx p{margin:0 0 .85em}.tx p:last-child{margin:0}
@@ -63,14 +74,12 @@ dialog::backdrop{background:rgba(0,0,0,.5)}
 dialog select,dialog textarea{background:var(--inp);color:var(--txt);border:1px solid var(--inpl);border-radius:12px;font:inherit;outline:0}
 .dh{display:flex;align-items:center;padding:12px 16px;border-bottom:1px solid var(--line);font-weight:600}.dh span{flex:1}
 .db{padding:14px 16px;max-height:70vh;overflow-y:auto}
-.u{margin-bottom:14px}.u .n{display:flex;justify-content:space-between;font-weight:600;margin-bottom:4px}
-.bar{height:8px;background:var(--sel);border-radius:4px;overflow:hidden;margin:3px 0}.bar i{display:block;height:100%;background:#10a37f}
-.bar.w i{background:#f5a623}.bar.x i{background:#e5484d}
-.u small{color:var(--mut);font-size:12px}
-#login{position:fixed;inset:0;background:var(--bg);display:none;place-items:center;z-index:9}
-#login form{background:var(--panel);padding:24px;border-radius:14px;width:min(360px,92vw);display:flex;flex-direction:column;gap:12px}
-#login input{padding:10px;border-radius:8px;border:1px solid var(--line);background:var(--bg);color:var(--txt);font:inherit}
-#login button{background:var(--acc);color:#fff}
+/* usage dialog: one compact chip per account, like the Ctrl+Alt+C panel (number, session and weekly % with reset time) */
+.nacc{display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:10px;padding:6px 10px;margin-bottom:6px;font-size:12.5px;font-variant-numeric:tabular-nums;cursor:pointer}.nacc.st{opacity:.5}.nacc .ni{font-weight:600;min-width:64px}
+.nacc .nu span{color:var(--mut)}
+#dNew{width:min(600px,96vw)}.nacc{flex-wrap:nowrap}.nacc input{flex:none;margin:0}.nacc .ni,.nacc .nu{white-space:nowrap}.nacc .nu{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.p0{color:#2fb383}.p1{color:#c9a227}.p2{color:#f5a623}.p3{color:#e5484d}
+@media(max-width:640px){.nacc .rw{display:none}.nacc{font-size:12px;padding:6px 8px}.nacc .ni{min-width:0}}
 #toast{position:fixed;left:50%;bottom:90px;transform:translateX(-50%);background:var(--txt);color:var(--bg);padding:8px 16px;border-radius:12px;display:none;z-index:20}
 @media(max-width:800px){
  #side{width:100%}#main{display:none}
@@ -83,26 +92,25 @@ dialog select,dialog textarea{background:var(--inp);color:var(--txt);border:1px 
 <div id="app">
  <section id="side">
   <header><h1>Claude Agents<div class="sub" id="hs"></div></h1>
-   <button id="bUsage" title="Usage (Ctrl+Alt+C)"><span class="ic">📊</span></button>
    <button id="bNew" title="New chat" aria-label="New chat"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/></svg></span></button></header>
-  <input id="search" placeholder="Search chats" autocomplete="off">
+  <input id="search" placeholder="Search chats" autocomplete="off" title="Same query language as the Ctrl+Alt+C panel: words, //title x, //status busy, //account name, !word, a||b, /s/age, /fts words (full text), /fts/live, /fts/archive">
   <div id="list"></div>
  </section>
  <section id="main">
-  <header><button id="back"><span class="ic">←</span></button><h1 id="ct">Select a chat<div class="sub" id="cs"></div></h1></header>
+  <header><button id="back"><span class="ic">←</span></button><h1 id="ct">Select a chat<div class="sub" id="cs"></div></h1><button id="bExit" title="Exit session (runs /exit and closes the shell)" aria-label="Exit session" style="display:none"><span class="ic">⏻</span></button></header>
   <div id="msgs"><div id="empty">Pick a conversation on the left,<br>or start a new one with the New chat button at the top.</div></div>
   <div id="typing"></div><div id="ask"></div>
+  <div id="pics"></div>
   <div id="bar"><textarea id="inp" rows="1" placeholder="Message" disabled></textarea><button id="send" disabled><span class="ic">➤</span></button></div>
  </section>
 </div>
-<dialog id="dUsage"><div class="dh"><span>Claude usage</span><button onclick="dUsage.close()">✕</button></div><div class="db" id="usage"></div></dialog>
 <dialog id="dNew"><div class="dh"><span>New chat</span><button onclick="dNew.close()">✕</button></div><div class="db">
- <select id="nAcc" style="width:100%;padding:8px;margin-bottom:8px"></select>
- <textarea id="nTxt" rows="4" placeholder="First message" style="width:100%;padding:8px;border-radius:8px"></textarea>
+ <div id="nAcc"></div>
+ <textarea id="nTxt" rows="4" placeholder="First message (optional)" style="width:100%;padding:8px;border-radius:8px"></textarea>
  <button id="nGo" style="background:var(--acc);color:#fff;margin-top:8px;width:100%">Start</button></div></dialog>
-<div id="login"><form id="lf"><b>Claude Agents</b><span class="sub" style="color:var(--mut)">Enter the pairing token</span>
- <input id="tok" type="password" autocomplete="current-password" placeholder="token"><button>Sign in</button><span id="le" style="color:#e5484d"></span></form></div>
+<div id="xp"><div class="q">Exit this session?<small>Runs /exit and closes the shell window. Resume it later from the archive.</small></div><div class="bt"><button id="xpGo">Exit</button><button id="xpNo">Cancel</button></div></div><div id="cp"></div><div id="hp"></div>
 <div id="toast"></div>
+<script src="/dsl.js"></script>
 <script>
 const $=id=>document.getElementById(id);
 const H={"X-Requested-With":"claude-agents-web"};
@@ -112,21 +120,66 @@ const colOf=a=>COL[Math.max(0,["claude","claude2","claude3","claude4","claude5",
 function toast(t){const e=$("toast");e.textContent=t;e.style.display="block";setTimeout(()=>e.style.display="none",2500)}
 async function api(path,opt={}){
  const r=await fetch("/api/v1"+path,{...opt,headers:{...H,...(opt.body?{"Content-Type":"application/json"}:{})},credentials:"same-origin"});
- if(r.status==401){$("login").style.display="grid";throw new Error("auth")}
  if(!r.ok)throw new Error((await r.json().catch(()=>({}))).error||r.status);
  return r.json()}
 const esc=s=>s.replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
 function md(t){
  const parts=t.split(/```/);
+ const inl=x=>x.replace(/`([^`\n]+)`/g,"<code>$1</code>").replace(/\*\*([^*\n]+)\*\*/g,"<b>$1</b>");
+ const cells=l=>{l=l.trim().replace(/^\|/,"").replace(/\|$/,"");return l.split("|").map(c=>c.trim())};
+ const isSep=l=>/^\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*$/.test(l)&&l.includes("-");
+ const isRow=l=>/^\s*\|.*\|\s*$/.test(l);
+ const table=ls=>{const h=cells(ls[0]),al=cells(ls[1]).map(c=>/^:-*:$/.test(c)?"center":/-:$/.test(c)?"right":"");
+  const td=(tag,c,i)=>`<${tag}${al[i]?` style="text-align:${al[i]}"`:""}>${inl(c)}</${tag}>`;
+  return '<div class="tw"><table><thead><tr>'+h.map((c,i)=>td("th",c,i)).join("")+"</tr></thead><tbody>"+
+   ls.slice(2).map(l=>"<tr>"+cells(l).map((c,i)=>td("td",c,i)).join("")+"</tr>").join("")+"</tbody></table></div>"};
+ const block=x=>{ // paragraphs and pipe tables (a table may follow a text line with no blank line between)
+  const ls=x.split("\n"),out=[];let para=[];
+  const flush=()=>{if(para.join("").trim())out.push("<p>"+inl(para.join("\n")).replace(/\n/g,"<br>")+"</p>");para=[]};
+  for(let i=0;i<ls.length;i++){
+   if(isRow(ls[i])&&i+1<ls.length&&isSep(ls[i+1])){let j=i+2;while(j<ls.length&&isRow(ls[j]))j++;flush();out.push(table(ls.slice(i,j)));i=j-1}
+   else para.push(ls[i])}
+  flush();return out.join("")};
  return parts.map((p,i)=>{
   if(i%2){const nl=p.indexOf("\n");return "<pre><code>"+esc(nl>=0&&nl<20&&!/\s/.test(p.slice(0,nl))?p.slice(nl+1):p)+"</code></pre>"}
-  return esc(p).split(/\n{2,}/).map(x=>x.trim()?"<p>"+x.replace(/`([^`\n]+)`/g,"<code>$1</code>").replace(/\*\*([^*\n]+)\*\*/g,"<b>$1</b>").replace(/\n/g,"<br>")+"</p>":"").join("")}).join("")}
+  return esc(p).split(/\n{2,}/).map(block).join("")}).join("")}
 const hm=ts=>ts?new Date(ts).toLocaleTimeString([], {hour:"2-digit",minute:"2-digit"}):"";
 function ago(e){const d=Date.now()/1000-e;if(d<60)return"now";if(d<3600)return Math.floor(d/60)+"m";if(d<86400)return Math.floor(d/3600)+"h";return Math.floor(d/86400)+"d"}
+/* ---- search box: the shared picker query DSL, the same engine (/dsl.js = ~/.config/quickshell/lib/dsl.js) and grammar as the
+   search box of the desktop Ctrl+Alt+C panel: bare words, //field value (fuzzy field names), ! negation, a||b alternatives,
+   /s/field[/dir] sort, and /fts[/live|/archive] words (full-text over the conversations, via claude-history).
+   This list has the panel's title/status/tokens/msgs/age/path/account types; pid, host, tmux-* and hypr-* are not part of
+   the web API, so filters on them match nothing. /ft /at /rt /g are parsed and inert here, as in the panel. */
+const TYPES=["title","status","tokens","msgs","age","path","account","fts"];   // "fts" is a filter, never a /s key
+const SCHEMA=window.DSL?DSL.makeSchema(TYPES,[],[]):null;
+const FTS_RE=/(^|\s)(!?)\/fts(?:\/([a-z,-]+))?(?=\s|$)(?:\s+("[^"]*"|(?!\/)\S+))?/g;   // same token as the panel's
+const FTSH={};   // lower-case term -> {session_id: score} once fetched, null while pending
+function ftsScope(keys){if(!keys)return{live:true,archive:true};const r=DSL.resolveNames(keys,["claude-live","claude-archive","tmux"]);return{live:r.indexOf("claude-live")>=0,archive:r.indexOf("claude-archive")>=0}}
+function ftsScopes(q){let u=null,m;FTS_RE.lastIndex=0;
+ while((m=FTS_RE.exec(q))!==null){const s=ftsScope(m[3]);u=u?{live:u.live||s.live,archive:u.archive||s.archive}:s}
+ return u}
+const rewriteFts=q=>q.replace(FTS_RE,(all,lead,neg,sc,arg)=>arg?lead+neg+"/fv/fts "+arg.replace(/"/g,""):lead);   // `/fts words` is sugar for `/fv/fts words`
+const rowOf=c=>({title:c.title||"",status:c.live?(c.live.status||"live"):"archive",tokens:c.tokens!=null?String(c.tokens):"",
+ msgs:c.msgs!=null?String(c.msgs):"",age:Math.max(0,Math.floor(Date.now()/1000-c.mtime))+"s",   // "<n>s": /s/age = newest first, as in the panel
+ path:(c.cwd||"").replace(/^\/home\/[^/]+(?=\/|$)/,"~"),
+ account:[c.account_label||"",c.account||""].filter(Boolean),_c:c});
+let ftsPending=0;
+function fetchFts(term){if(term in FTSH)return;FTSH[term]=null;ftsPending++;
+ api("/fts?q="+encodeURIComponent(term)).then(r=>{FTSH[term]=r.hits||{}}).catch(()=>{FTSH[term]={}}).finally(()=>{ftsPending--;renderList()})}
+function visibleConvs(raw){
+ const q=raw.trim();if(!q)return convs;
+ if(!SCHEMA){const l=q.toLowerCase();return convs.filter(c=>(c.title||"").toLowerCase().includes(l))}   // engine failed to load: plain substring
+ const scopes=ftsScopes(q),parsed=DSL.parseQuery(SCHEMA,rewriteFts(q));
+ for(const t of parsed.terms)if(t.scoped&&t.value&&DSL.resolveNames(t.keys,TYPES).indexOf("fts")>=0)fetchFts(String(t.value).toLowerCase());
+ const ext=(row,ty,v)=>ty!=="fts"?null:(h=>!!h&&h[row._c.id]!==undefined)(FTSH[String(v).toLowerCase()]);
+ let rows=convs.map(rowOf);
+ if(scopes)rows=rows.filter(r=>r._c.live?scopes.live:scopes.archive);
+ return DSL.selectRows(SCHEMA,parsed,rows,r=>(r.title+" "+r.status+" "+r.path+" "+r.account.join(" ")).toLowerCase(),ext).map(r=>r._c)}
 function renderList(){
- const q=$("search").value.toLowerCase();
+ const raw=$("search").value,vis=visibleConvs(raw);
  $("list").innerHTML="";
- convs.filter(c=>!q||(c.title||"").toLowerCase().includes(q)).forEach(c=>{
+ if(!vis.length&&raw.trim())$("list").innerHTML='<div style="padding:18px;text-align:center;opacity:.6;font-size:13px">'+(ftsPending?"Searching…":"No matching chats")+"</div>";
+ vis.forEach(c=>{
   const d=document.createElement("div");d.className="row"+(cur&&cur.id==c.id?" on":"");
   const st=c.live?c.live.status:null;
   d.innerHTML=`<div class="av ${c.live?"live":""} ${st=="busy"?"busy":""}" style="background:${colOf(c.account)}">${esc((c.title||"?").trim().charAt(0).toUpperCase())}</div>
@@ -134,22 +187,43 @@ function renderList(){
   <div class="r2"><span class="rs">${esc(c.account_label||c.account)}${c.context_pct!=null?" · ctx "+c.context_pct+"%":""}${st?" · "+esc(st):""}</span></div></div>`;
   d.onclick=()=>open(c);$("list").appendChild(d)})}
 async function loadList(){try{convs=(await api("/conversations")).sort((a,b)=>b.mtime-a.mtime);renderList();$("hs").textContent=convs.filter(c=>c.live).length+" live · "+convs.length+" chats"}catch(e){}}
+// one-line headline of a tool call / result: the first meaningful line, fences and the arrow stripped
+function headline(t){const ls=String(t||"").split("\n");let head="";
+ for(let l of ls){const raw=l.trim();if(!raw)continue;
+  if(/^→\s/.test(raw)&&!head){head=raw.replace(/^→\s*/,"");continue}
+  if(/^```/.test(raw))continue;
+  return (head?head+": ":"")+raw.slice(0,200)}
+ return head||"(empty)"}
 function bubble(m){
  const d=document.createElement("div");
- const role=m.role=="user"?"me":m.role=="assistant"?"ai":m.role=="error"?"err":"tool";
- d.className="b "+role;
- d.innerHTML=`<div class="tx">${md(m.text)}</div><div class="ts">${hm(m.ts)}</div>`;
+ // an assistant turn that is only a tool call ("→ Bash ...") is shown as a compact tool line, like the Android bundles
+ const isCall=m.role=="assistant"&&/^→ \w/.test(m.text||"")&&!/\n\n[^`→\s]/.test(m.text||"");
+ const role=isCall?"tool":m.role=="user"?"me":m.role=="assistant"?"ai":m.role=="error"?"err":"tool";
+ d.className="b "+role+(isCall?" call":"");
+ d.innerHTML=(role=="tool"?`<span class="hl">${esc(headline(m.text))}</span>`:"")+`<div class="tx">${md(m.text)}</div><div class="ts">${hm(m.ts)}</div>`;
  if(role=="tool")d.onclick=()=>d.classList.toggle("open");
+ if(role=="me")d.dataset.raw=String(m.text||"").replace(/^\[(?:image|file) attached:[^\]]*\]\n?/,"");
+ if(role=="me")d.onclick=()=>{if(String(getSelection()||"").length)return;toggleFold(d)};
  d.dataset.line=m.line;return d}
+// clicking one of my messages folds / unfolds the whole response under it (everything up to my next message)
+function foldCount(d){let n=0;for(let x=d.nextElementSibling;x&&!x.classList.contains("me");x=x.nextElementSibling)if(x.id!="pend"&&!x.classList.contains("sending"))n++;return n}
+function toggleFold(d){const f=!d.classList.contains("folded");d.classList.toggle("folded",f);
+ let n=0;for(let x=d.nextElementSibling;x&&!x.classList.contains("me");x=x.nextElementSibling){x.hidden=f;n++}
+ d.dataset.hid=n}
 function addMsgs(ms){
  const box=$("msgs"),atBot=box.scrollHeight-box.scrollTop-box.clientHeight<120;
  if($("empty"))$("empty").remove();
- ms.forEach(m=>{if(m.line>last){box.appendChild(bubble(m));last=m.line}});
+ if(ms.length&&$("pend"))$("pend").remove();
+ ms.forEach(m=>{if(m.line>last){const b=bubble(m);
+  if(m.role=="user"){const n=String(m.text||"").trim();const q=[...box.querySelectorAll(".sending")].find(x=>x.dataset.t==n);if(q)q.remove()}   // my own follow-up has landed in the transcript
+  const sp=box.querySelector(".sending");if(sp)box.insertBefore(b,sp);else box.appendChild(b);last=m.line;
+  if(!b.classList.contains("me")){let u=b.previousElementSibling;while(u&&!u.classList.contains("me"))u=u.previousElementSibling;   // new reply under a folded message stays folded
+   if(u&&u.classList.contains("folded")){b.hidden=true;u.dataset.hid=(+u.dataset.hid||0)+1}}}});
  if(atBot)box.scrollTop=box.scrollHeight}
 async function open(c){
- cur=c;last=0;polling++;document.body.classList.add("chat");
+ pics.forEach(p=>URL.revokeObjectURL(p.url));pics=[];renderPics(); cur=c;try{history.replaceState(null,"","#/chat/"+c.id)}catch(e){}$("bExit").style.display="";last=0;polling++;document.body.classList.add("chat");
  $("ct").firstChild.textContent=c.title||"(untitled)";$("cs").textContent=c.account_label||"";
- $("msgs").innerHTML="";$("inp").disabled=false;$("send").disabled=false;$("ask").style.display="none";renderList();
+ const pend=$("pend");$("msgs").innerHTML="";if(pend)$("msgs").appendChild(pend);$("inp").disabled=false;$("send").disabled=false;$("ask").style.display="none";renderList();
  try{const r=await api(`/conversations/${c.id}/messages?since=0`);addMsgs(r.messages);$("msgs").scrollTop=$("msgs").scrollHeight}catch(e){}
  poll(polling)}
 async function poll(gen){
@@ -161,7 +235,7 @@ async function poll(gen){
    $("typing").textContent=r.status=="busy"?"Claude is working…":"";
    $("cs").textContent=(cur.account_label||"")+(r.context_pct!=null?" · context "+r.context_pct+"%":"");
    showQ(r.question);
-  }catch(e){if(e.message=="auth")return;await new Promise(r=>setTimeout(r,3000))}}}
+  }catch(e){if(e.message=="auth")return;await new Promise(r=>setTimeout(r,last?3000:800))}}}
 function showQ(q){
  const a=$("ask");if(!q||!q.questions){a.style.display="none";return}
  a.style.display="block";a.innerHTML="";
@@ -172,41 +246,155 @@ function showQ(q){
      try{await api(`/conversations/${cur.id}/answer`,{method:"POST",body:JSON.stringify({tool_use_id:q.id,answers:picked.map(s=>({selected:s}))})});a.style.display="none"}catch(e){toast("Answer failed: "+e.message)}}else b.style.background="var(--acc)"};
    a.appendChild(b)})});
  const dm=document.createElement("button");dm.className="opt";dm.textContent="Dismiss";dm.onclick=async()=>{try{await api(`/conversations/${cur.id}/answer`,{method:"POST",body:JSON.stringify({tool_use_id:q.id,dismiss:true})});a.style.display="none"}catch(e){toast(e.message)}};a.appendChild(dm)}
+let pics=[];
+function renderPics(){const el=$("pics");el.classList.toggle("on",pics.length>0);el.innerHTML="";
+ pics.forEach((p,i)=>{const d=document.createElement("div");d.className="pic";const im=new Image();im.src=p.url;d.appendChild(im);
+  const x=document.createElement("button");x.textContent="✕";x.title="Remove";x.onclick=()=>{URL.revokeObjectURL(p.url);pics.splice(i,1);renderPics()};d.appendChild(x);el.appendChild(d)})}
+function addPics(files){let n=0;for(const f of files){if(!f||!/^image\//.test(f.type))continue;
+  if(f.size>25*1024*1024){toast("Image too large (max 25 MB)");continue}
+  pics.push({file:f,url:URL.createObjectURL(f)});n++}
+ if(n){renderPics();$("inp").focus()}return n}
+$("inp").addEventListener("paste",e=>{const fs=[...(e.clipboardData?.items||[])].filter(i=>i.kind==="file").map(i=>i.getAsFile());
+ if(fs.length&&addPics(fs))e.preventDefault()});
+$("main").addEventListener("dragover",e=>{if([...(e.dataTransfer?.types||[])].includes("Files"))e.preventDefault()});
+$("main").addEventListener("drop",e=>{if(e.dataTransfer?.files?.length){e.preventDefault();addPics([...e.dataTransfer.files])}});
+const b64=f=>new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(String(r.result).split(",")[1]);r.onerror=()=>rej(r.error);r.readAsDataURL(f)});
 async function send(){
- const t=$("inp").value.trim();if(!t||!cur)return;
- $("inp").value="";grow();
- try{await api(`/conversations/${cur.id}/send`,{method:"POST",body:JSON.stringify({text:t,id:crypto.randomUUID?crypto.randomUUID():String(Date.now())+Math.random()})})}
- catch(e){toast("Send failed: "+e.message);$("inp").value=t}}
+ const t=$("inp").value.trim();if((!t&&!pics.length)||!cur)return;
+ const batch=pics.slice();
+ $("inp").value="";grow();CH.pos=-1;pics=[];renderPics();
+ const mid=()=>crypto.randomUUID?crypto.randomUUID():String(Date.now())+Math.random();
+ let pb=null;
+ if(!batch.length&&t){   // show it at once, even while Claude is mid-turn; replaced by the real bubble when the transcript catches up
+  pb=document.createElement("div");pb.className="b me sending";pb.dataset.t=t;pb.style.opacity=".6";pb.textContent=t;
+  const box=$("msgs");box.appendChild(pb);box.scrollTop=box.scrollHeight}
+ try{
+  if(batch.length){
+   for(let i=0;i<batch.length;i++){const f=batch[i].file,last=i==batch.length-1;
+    const ext=(f.type.split("/")[1]||"png").replace("jpeg","jpg").replace(/[^a-z0-9]/gi,"");
+    await api(`/conversations/${cur.id}/attachments`,{method:"POST",body:JSON.stringify({filename:f.name&&f.name!=="image.png"?f.name:`pasted-${Date.now()}-${i+1}.${ext}`,mime_type:f.type,data_base64:await b64(f),caption:last?t:"",id:mid()})});
+    URL.revokeObjectURL(batch[i].url)}}
+  else await api(`/conversations/${cur.id}/send`,{method:"POST",body:JSON.stringify({text:t,id:mid()})})}
+ catch(e){if(pb)pb.remove();toast("Send failed: "+e.message);$("inp").value=t;grow();pics=batch;renderPics()}}
 function grow(){const i=$("inp");i.style.height="auto";i.style.height=Math.min(i.scrollHeight,140)+"px"}
-$("inp").oninput=grow;$("send").onclick=send;
-$("inp").onkeydown=e=>{if(e.key=="Enter"&&!e.shiftKey&&!e.isComposing&&innerWidth>800){e.preventDefault();send()}};
-$("search").oninput=renderList;
-$("back").onclick=()=>{document.body.classList.remove("chat");polling++;cur=null;renderList()};
+$("inp").oninput=()=>{grow();CH.pos=-1;if(HPOP.open)hpopNarrow()};$("send").onclick=send;
+/* ---- composer history: Up / Down walk my earlier messages in this thread, Ctrl+R lists them all (filtered by what is typed) ---- */
+const CH={pos:-1,draft:""};
+function myMsgs(){const out=[];for(const d of $("msgs").querySelectorAll(".b.me")){const t=(d.dataset.raw||"").trim();if(t&&out[0]!==t)out.unshift(t)}return out}   // newest first, neighbours de-duplicated
+function setComposer(v){const i=$("inp");i.value=v;grow();i.setSelectionRange(v.length,v.length)}
+function histWalk(dir){const l=myMsgs();if(!l.length)return false;
+ if(dir<0){if(CH.pos<0)CH.draft=$("inp").value;if(CH.pos>=l.length-1)return true;CH.pos++;setComposer(l[CH.pos]);return true}
+ if(CH.pos<0)return false;CH.pos--;setComposer(CH.pos<0?CH.draft:l[CH.pos]);return true}
+const HPOP={open:false,c:[],sel:0};
+const hfuzzy=(h,n)=>{let i=0;h=h.toLowerCase();for(const c of n.toLowerCase()){i=h.indexOf(c,i);if(i<0)return false;i++}return true};
+function hpopCands(){const q=$("inp").value.trim(),l=myMsgs();if(!q)return l;const low=q.toLowerCase();
+ const a=l.filter(t=>t.toLowerCase().includes(low));return a.concat(l.filter(t=>!a.includes(t)&&hfuzzy(t,q)))}
+function hpopDraw(){const el=$("hp");if(!HPOP.open){el.style.display="none";return}
+ const r=$("bar").getBoundingClientRect();el.style.left=r.left+"px";el.style.minWidth=Math.min(r.width,560)+"px";el.style.bottom=(innerHeight-r.top+6)+"px";el.style.top="auto";el.style.display="block";
+ el.innerHTML=HPOP.c.length?HPOP.c.slice(0,60).map((t,i)=>`<div class="${i==HPOP.sel?"sel":""}" data-i="${i}"><span>${esc(t.replace(/\s+/g," "))}</span></div>`).join(""):'<div class="hd">no earlier messages match</div>';
+ const s=el.querySelector(".sel");if(s)s.scrollIntoView({block:"nearest"})}
+function hpopClose(){HPOP.open=false;$("hp").style.display="none"}
+function hpopOpen(){HPOP.c=hpopCands();HPOP.sel=0;HPOP.open=true;hpopDraw()}
+function hpopNarrow(){HPOP.c=hpopCands();HPOP.sel=0;hpopDraw()}
+function hpopAccept(i){const t=HPOP.c[i];if(t==null)return;hpopClose();setComposer(t);CH.pos=-1;$("inp").focus()}
+$("hp").addEventListener("mousedown",e=>{const d=e.target.closest("[data-i]");if(d){e.preventDefault();hpopAccept(+d.dataset.i)}});
+$("inp").addEventListener("blur",()=>setTimeout(hpopClose,150));
+$("inp").onkeydown=e=>{const k=e.key,i=$("inp");
+ if(HPOP.open){const n=Math.min(HPOP.c.length,60);
+  if(k==="ArrowUp"||(e.ctrlKey&&k==="k")){e.preventDefault();if(n)HPOP.sel=(HPOP.sel+1)%n;return hpopDraw()}      // list is newest first, drawn bottom-up: Up = older
+  if(k==="ArrowDown"||(e.ctrlKey&&k==="j")){e.preventDefault();if(n)HPOP.sel=(HPOP.sel+n-1)%n;return hpopDraw()}
+  if(k==="Enter"||k==="Tab"){e.preventDefault();return hpopAccept(HPOP.sel)}
+  if(k==="Escape"){e.preventDefault();return hpopClose()}
+  return}
+ if(e.ctrlKey&&!e.altKey&&(k==="r"||k==="R")){e.preventDefault();return hpopOpen()}
+ if(k==="ArrowUp"&&!e.shiftKey&&!e.ctrlKey&&!e.altKey&&!e.metaKey){
+  const before=i.value.slice(0,i.selectionStart),firstLine=!before.includes("\n");
+  if(firstLine&&(CH.pos>=0||i.selectionStart===0||!i.value)&&histWalk(-1))return e.preventDefault()}
+ if(k==="ArrowDown"&&!e.shiftKey&&!e.ctrlKey&&!e.altKey&&!e.metaKey&&CH.pos>=0){
+  const after=i.value.slice(i.selectionEnd);if(!after.includes("\n")&&histWalk(1))return e.preventDefault()}
+ if(k=="Enter"&&!e.shiftKey&&!e.isComposing&&innerWidth>800){e.preventDefault();send()}};
+$("search").oninput=()=>{renderList();if(CPS.open)cpsNarrow()};
+/* ---- search-box completion: Tab or Ctrl+Space at a word starting with "/" (or "//") lists the commands and fields ---- */
+const CPS={open:false,c:[],sel:0,start:0};
+const CVERBS=[["/fv ","filter by field value: /fv title x"],["/ft ","filter types (columns)"],["/at ","add types"],["/rt ","remove types"],["/s/","sort: /s/age, /s/tokens/desc"],["/sort/","sort (long form)"],["/g/","group by field"],["/fts ","full-text search over the conversations: /fts words"]];
+const CFIELDS=TYPES.filter(t=>t!=="fts");
+function cpsCands(q){
+ const m=/\s(?=\S*$)/.exec(q);let st=m?m.index+1:0;if(q[st]==="!")st++;
+ const f=q.slice(st);if(f[0]!=="/")return[st,[]];
+ const out=[];
+ if(f.startsWith("//")){for(const n of CFIELDS)if(("//"+n).startsWith(f)||n.startsWith(f.slice(2)))out.push(["//"+n+" ","field: match only in "+n]);return[st,out]}
+ const sm=/^\/(s|sort|g|group)\/([^/]*)(?:\/(.*))?$/.exec(f);
+ if(sm){const verb="/"+sm[1]+"/";
+  if(sm[3]!=null){for(const d of ["asc","desc"])if(d.startsWith(sm[3]))out.push([verb+sm[2]+"/"+d+" ","direction"]);return[st,out]}
+  for(const n of CFIELDS)if(n.startsWith(sm[2]))out.push([verb+n+(sm[1][0]=="s"?"":" "),(sm[1][0]=="s"?"sort by ":"group by ")+n]);return[st,out]}
+ const fm=/^\/fts\/([^/\s]*)$/.exec(f);
+ if(fm){for(const n of ["live","archive"])if(n.startsWith(fm[1]))out.push(["/fts/"+n+" ","only "+n+" conversations"]);return[st,out]}
+ if(!f.slice(1).includes("/")){for(const [v,l] of CVERBS)if(v.startsWith(f))out.push([v,l]);
+  for(const n of CFIELDS)if(("/s/"+n).startsWith(f))out.push(["/s/"+n,"sort by "+n])}
+ return[st,out]}
+function cpsDraw(){const el=$("cp");if(!CPS.open||!CPS.c.length){el.style.display="none";return}
+ const r=$("search").getBoundingClientRect();el.style.left=r.left+"px";el.style.top=(r.bottom+4)+"px";el.style.minWidth=Math.max(240,r.width)+"px";el.style.display="block";
+ el.innerHTML=CPS.c.map(([v,l],i)=>`<div class="${i==CPS.sel?"sel":""}" data-i="${i}"><b>${esc(v.trim())}</b><span>${esc(l)}</span></div>`).join("");
+ const s=el.querySelector(".sel");if(s)s.scrollIntoView({block:"nearest"})}
+function cpsClose(){CPS.open=false;$("cp").style.display="none"}
+function cpsApply(i){const q=$("search").value,c=CPS.c[i];if(!c)return;
+ $("search").value=q.slice(0,CPS.start)+c[0];cpsClose();$("search").focus();renderList();
+ const [st,n]=cpsCands($("search").value);if(n.length&&/\/$/.test(c[0])){CPS.start=st;CPS.c=n;CPS.sel=0;CPS.open=true;cpsDraw()}}   // "/s/" goes straight on to the field list
+function cpsStart(){const [st,c]=cpsCands($("search").value);if(!c.length)return false;
+ if(c.length==1){CPS.start=st;CPS.c=c;cpsApply(0);return true}
+ CPS.start=st;CPS.c=c;CPS.sel=0;CPS.open=true;cpsDraw();return true}
+function cpsNarrow(){const [st,c]=cpsCands($("search").value);if(!c.length)return cpsClose();CPS.start=st;CPS.c=c;CPS.sel=Math.min(CPS.sel,c.length-1);cpsDraw()}
+$("search").addEventListener("keydown",e=>{
+ const k=e.key;
+ if(CPS.open){
+  if(k==="ArrowDown"||(e.ctrlKey&&k==="j")){e.preventDefault();CPS.sel=(CPS.sel+1)%CPS.c.length;return cpsDraw()}
+  if(k==="ArrowUp"||(e.ctrlKey&&k==="k")){e.preventDefault();CPS.sel=(CPS.sel+CPS.c.length-1)%CPS.c.length;return cpsDraw()}
+  if(k==="Tab"||k==="Enter"){e.preventDefault();return cpsApply(CPS.sel)}
+  if(k==="Escape"){e.preventDefault();e.stopPropagation();return cpsClose()}}
+ else if(k==="Tab"&&!e.shiftKey||(e.ctrlKey&&(k===" "||e.code==="Space"))){if(cpsStart())e.preventDefault()}});
+$("search").addEventListener("blur",()=>setTimeout(cpsClose,150));
+$("cp").addEventListener("mousedown",e=>{const d=e.target.closest("[data-i]");if(d){e.preventDefault();cpsApply(+d.dataset.i)}});
+const xpClose=()=>{$("xp").style.display="none"};
+$("bExit").onclick=e=>{if(!cur)return;e.stopPropagation();
+ const r=$("bExit").getBoundingClientRect(),x=$("xp");x.style.display="block";
+ x.style.top=(r.bottom+6)+"px";x.style.left=Math.max(8,Math.min(innerWidth-x.offsetWidth-8,r.right-x.offsetWidth))+"px";$("xpGo").focus()};
+$("xpNo").onclick=xpClose;
+addEventListener("mousedown",e=>{if(!e.target.closest("#xp,#bExit"))xpClose()});
+addEventListener("keydown",e=>{if(e.key==="Escape")xpClose()});
+$("xpGo").onclick=async()=>{xpClose();if(!cur)return;
+ const b=$("bExit");b.disabled=true;
+ try{await api("/conversations/"+cur.id+"/exit",{method:"POST",body:"{}"});toast("Session exited")}
+ catch(e){if(/not live|409/i.test(e.message))toast("Session already exited");else toast("Exit failed: "+e.message)}
+ b.disabled=false;loadList()};
+$("back").onclick=()=>{try{history.replaceState(null,"",location.pathname+location.search)}catch(e){}$("bExit").style.display="none";document.body.classList.remove("chat");polling++;cur=null;renderList()};
 function fmtReset(s){if(!s)return"";const d=(new Date(s)-Date.now())/60000;if(d<=0)return"resets now";return d<120?"resets in "+Math.round(d)+" min":d<2880?"resets in "+Math.round(d/60)+" h":"resets in "+Math.round(d/1440)+" d"}
 const cls=p=>p>=90?"x":p>=70?"w":"";
-async function showUsage(){
- dUsage.showModal();const el=$("usage");el.textContent="Loading…";
- try{const u=await api("/usage");const row=(n,a,stale)=>`<div class="u"><div class="n"><span>${esc(n)}</span><small>${stale?"stale":""}</small></div>
-  <small>Session ${a.session_pct}% · ${fmtReset(a.session_resets_at)}</small><div class="bar ${cls(a.session_pct)}"><i style="width:${a.session_pct}%"></i></div>
-  <small>Week ${a.weekly_pct}% · ${fmtReset(a.weekly_resets_at)}</small><div class="bar ${cls(a.weekly_pct)}"><i style="width:${a.weekly_pct}%"></i></div></div>`;
-  el.innerHTML=(u.accounts||[]).map(a=>row(a.account,a,a.stale)).join("")+(u.codex?row("codex",u.codex,false):"")+`<small>Updated ${u.updated_at?new Date(u.updated_at).toLocaleTimeString():"?"}</small>`}
- catch(e){el.textContent="Failed: "+e.message}}
-$("bUsage").onclick=showUsage;
-addEventListener("keydown",e=>{if(e.ctrlKey&&e.altKey&&e.key.toLowerCase()=="c"){e.preventDefault();dUsage.open?dUsage.close():showUsage()}});
+const rel=s=>{if(!s)return"";const m=Math.round((new Date(s)-Date.now())/60000);if(m<=0)return"now";if(m<60)return m+"m";if(m<1440)return Math.floor(m/60)+"h "+m%60+"m";return Math.floor(m/1440)+"d "+Math.floor(m%1440/60)+"h"};
+const ramp=p=>p==null?"":p>=90?"p3":p>=70?"p2":p>=50?"p1":"p0";
+const part=(name,pct,rs)=>`<span>${name}</span> ${typeof pct!=="number"?"--":`<b class="${ramp(pct)}">${Math.round(pct)}%</b>`} ${rs?`<span class="rw">resets in</span> ${rel(rs)}`:""}`;
+const accKey=k=>k==="claude"?"claude1":k;
+async function renderNewAccounts(){
+ let us={};try{const u=await api("/usage");for(const a of u.accounts||[])us[accKey(a.account)]=a}catch(e){}
+ $("nAcc").innerHTML=accounts.map((a,i)=>{const u=us[a.dir_key]||us[accKey(a.dir_key)];
+  return `<label class="nacc${u&&u.stale?" st":""}"><input type="radio" name="nacc" value="${esc(a.dir_key)}"${i?"":" checked"}><span class="ni">${esc(a.dir_key)}</span><span class="nu">${u?part("session",u.session_pct,u.session_resets_at)+" &nbsp; "+part("weekly",u.weekly_pct,u.weekly_resets_at):""}</span></label>`}).join("")}
 $("bNew").onclick=async()=>{try{accounts=await api("/accounts")}catch(e){return}
- $("nAcc").innerHTML=accounts.map(a=>`<option value="${esc(a.dir_key)}">${esc(a.dir_key)} — ${esc(a.label)}</option>`).join("");dNew.showModal()};
-$("nGo").onclick=async()=>{const t=$("nTxt").value.trim();if(!t)return;$("nGo").disabled=true;
- try{const r=await api("/spawn",{method:"POST",body:JSON.stringify({account:$("nAcc").value,text:t})});dNew.close();$("nTxt").value="";await loadList();const c=convs.find(x=>x.id==r.session_id)||r.conversation;if(c)open(c)}
- catch(e){toast("Spawn failed: "+e.message)}$("nGo").disabled=false};
-$("lf").onsubmit=async e=>{e.preventDefault();
- const r=await fetch("/api/v1/web-login",{method:"POST",headers:{...H,"Content-Type":"application/json"},body:JSON.stringify({token:$("tok").value.trim()}),credentials:"same-origin"});
- if(r.ok){$("login").style.display="none";$("tok").value="";start()}else $("le").textContent="Wrong token"};
-async function start(){await loadList();setInterval(()=>{if(!document.hidden)loadList()},10000)}
-(async()=>{
- const m=location.hash.match(/token=([0-9a-f]+)/);
- if(m){history.replaceState(null,"",location.pathname);
-  await fetch("/api/v1/web-login",{method:"POST",headers:{...H,"Content-Type":"application/json"},body:JSON.stringify({token:m[1]}),credentials:"same-origin"})}
- start()})();
+ dNew.showModal();await renderNewAccounts()};
+$("nGo").onclick=async()=>{const t=$("nTxt").value.trim(),acc=(document.querySelector("input[name=nacc]:checked")||{}).value;
+ // instant: close the dialog and show the new chat at once; the daemon boots the session in the background
+ dNew.close();$("nTxt").value="";
+ cur=null;polling++;document.body.classList.add("chat");$("bExit").style.display="none";
+ $("ct").firstChild.textContent=t?t.slice(0,60):"New chat";$("cs").textContent="starting…";
+ $("msgs").innerHTML="";$("ask").style.display="none";$("typing").textContent="";$("inp").disabled=true;$("send").disabled=true;
+ if(t){const p=document.createElement("div");p.id="pend";p.className="b me";p.textContent=t;$("msgs").appendChild(p)}
+ try{const r=await api("/spawn",{method:"POST",body:JSON.stringify({account:acc,text:t,async:true})});
+  await loadList();const c=convs.find(x=>x.id==r.session_id)||r.conversation;if(c){await open(c);$("inp").focus()}}
+ catch(e){toast("Spawn failed: "+e.message);document.body.classList.remove("chat");renderList()}};
+const hashId=()=>{const m=/^#\/chat\/([0-9a-fA-F-]{36})$/.exec(location.hash);return m?m[1]:null};
+async function openFromHash(){const id=hashId();if(!id||(cur&&cur.id==id))return;
+ const c=convs.find(x=>x.id==id)||{id,title:"",account_label:""};open(c)}
+addEventListener("hashchange",()=>{if(hashId())openFromHash();else if(cur){$("back").onclick()}});
+async function start(){await loadList();await openFromHash();setInterval(()=>{if(!document.hidden)loadList()},10000)}
+start();
 </script>
 </body>
 </html>
