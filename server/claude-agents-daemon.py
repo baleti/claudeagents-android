@@ -81,6 +81,39 @@ for _d in [PROJECTS_DIR] + [d / "projects" for d in ACCOUNT_DIRS.values()]:
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 USAGE_STATE_FILE = HOME / ".cache" / "claude-usage" / "state.json"
+
+# Base query (query-dsl.md "/base-query"): one standing query string shared by every client (web, Android, and the
+# CTRL+ALT+c panel, which reads/writes these same two files). Plain text + a JSON list of every previous value.
+BASE_QUERY_FILE = Path.home() / ".cache" / "quickshell" / "claude-usage-query-default.txt"
+BASE_QUERY_HISTORY_FILE = Path.home() / ".cache" / "quickshell" / "claude-usage-base-query-history.json"
+
+
+def base_query_get() -> dict:
+    try:
+        q = BASE_QUERY_FILE.read_text().strip()
+    except Exception:
+        q = ""
+    try:
+        h = json.loads(BASE_QUERY_HISTORY_FILE.read_text())
+        h = [x for x in h if isinstance(x, str)] if isinstance(h, list) else []
+    except Exception:
+        h = []
+    return {"query": q, "history": h}
+
+
+def base_query_set(q: str) -> dict:
+    cur = base_query_get()
+    prev = cur["query"]
+    h = cur["history"]
+    if q and prev and prev != q and prev not in h:
+        h = [prev] + h  # the outgoing value may predate the history file
+    if q:
+        h = ([q] + [x for x in h if x != q])[:100]
+    BASE_QUERY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    BASE_QUERY_FILE.write_text(q)
+    BASE_QUERY_HISTORY_FILE.write_text(json.dumps(h))
+    return {"query": q, "history": h}
+
 WEB_STATIC = {"/": ("index.html", "text/html; charset=utf-8"),
               "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json")}
 # The shared picker-query engine (the same file the quickshell panels import), served to the web page so its search
@@ -2571,6 +2604,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self._ok({"accounts": d.get("accounts", []), "codex": d.get("codex"), "updated_at": d.get("updated_at"),
                              "sessions": {k: [{x: v.get(x) for x in ("title", "status", "session_id", "context_tokens", "cwd")} for v in vs] for k, vs in (d.get("sessions") or {}).items()}})
 
+        if path == "/api/v1/base-query":
+            return self._ok(base_query_get())
+
         if path == "/api/v1/fts":
             q = ((qs.get("q") or [""])[0]).strip()[:200]
             if not q:
@@ -2703,6 +2739,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path
         ip = self.client_address[0]
+
+        if path == "/api/v1/base-query":
+            length = int(self.headers.get("Content-Length", "0"))
+            if length <= 0 or length > 100_000:
+                return self._reject(400, "bad request")
+            try:
+                body = json.loads(self.rfile.read(length))
+            except Exception:
+                return self._reject(400, "bad json")
+            q = body.get("query", "")
+            if not isinstance(q, str):
+                return self._reject(400, "bad query")
+            return self._ok(base_query_set(q.strip()[:20000]))
 
         if path == "/api/v1/spawn":
             # Tighter than the "send" bucket - this starts a real Claude

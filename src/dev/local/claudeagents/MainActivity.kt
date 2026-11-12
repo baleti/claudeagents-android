@@ -560,6 +560,7 @@ class MainActivity : Activity() {
         searchInput.setSingleLine(true)
         searchInput.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
         QueryDsl.loadDefault(this)
+        QueryDsl.syncFromServer(this) { searchInput.setText(searchInput.text.toString()) }   // base query is kept on the server
         // Enter on "/base-query": bare = load the current base query into the box; with text = save it
         searchInput.setOnEditorActionListener { _, _, _ ->
             val r = QueryDsl.runDefaultCommand(this, searchInput.text.toString())

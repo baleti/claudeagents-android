@@ -169,6 +169,24 @@ object QueryDsl {
         return out.joinToString(" ")
     }
 
+    private fun applyServerBaseQuery(activity: android.app.Activity, o: org.json.JSONObject) {
+        defaultQuery = o.optString("query", "").trim()
+        val h = o.optJSONArray("history")
+        baseHistory = if (h == null) emptyList() else (0 until h.length()).map { h.optString(it) }.filter { it.isNotEmpty() }
+        activity.getSharedPreferences(DEFAULT_PREFS, Context.MODE_PRIVATE).edit()
+            .putString("query", defaultQuery).putString("history", baseHistory.joinToString("\n")).apply()
+    }
+
+    /** Pulls the shared base query from the relay (it is kept on the server, SharedPreferences is only a cache); [onDone] runs on the UI thread. */
+    fun syncFromServer(activity: android.app.Activity, onDone: () -> Unit) {
+        Thread {
+            try {
+                val o = RelayClient(activity).getBaseQuery()
+                activity.runOnUiThread { applyServerBaseQuery(activity, o); onDone() }
+            } catch (e: Exception) { /* offline: keep the cached value */ }
+        }.apply { isDaemon = true; name = "QueryDslBaseSync"; start() }
+    }
+
     /** Current base query first (if set), then the previous ones. */
     fun baseCandidates(): List<String> {
         val cur = defaultQuery.trim()
@@ -222,6 +240,10 @@ object QueryDsl {
         if (defaultQuery.isNotEmpty()) baseHistory = (listOf(defaultQuery) + baseHistory.filter { it != defaultQuery }).take(100)
         activity.getSharedPreferences(DEFAULT_PREFS, Context.MODE_PRIVATE).edit()
             .putString("query", defaultQuery).putString("history", baseHistory.joinToString("\n")).apply()
+        val q = defaultQuery
+        Thread {
+            try { RelayClient(activity).setBaseQuery(q) } catch (e: Exception) { /* offline: the next sync overwrites; keeps the local value until then */ }
+        }.apply { isDaemon = true; name = "QueryDslBasePush"; start() }
         return ""
     }
 

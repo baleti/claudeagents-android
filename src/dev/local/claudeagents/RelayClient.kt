@@ -83,6 +83,11 @@ class RelayClient(context: Context) {
         return out
     }
 
+    /** The shared base query (served by the daemon; also what the web page and the CTRL+ALT+c panel use). */
+    fun getBaseQuery(): JSONObject = request("GET", "/api/v1/base-query", null)
+
+    fun setBaseQuery(query: String): JSONObject = request("POST", "/api/v1/base-query", JSONObject().put("query", query))
+
     fun getConversations(): JSONArray = requestArray("GET", "/api/v1/conversations")
 
     fun getMessages(sessionId: String, since: Int): JSONObject =

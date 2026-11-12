@@ -589,6 +589,7 @@ class ChatActivity : Activity() {
         drawerSearchInput.setSingleLine(true)
         drawerSearchInput.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
         QueryDsl.loadDefault(this)
+        QueryDsl.syncFromServer(this) { drawerSearchInput.setText(drawerSearchInput.text.toString()) }   // base query is kept on the server
         // Enter on "/base-query": bare = load the current base query into the box; with text = save it
         drawerSearchInput.setOnEditorActionListener { _, _, _ ->
             val r = QueryDsl.runDefaultCommand(this, drawerSearchInput.text.toString())

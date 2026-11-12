@@ -206,9 +206,14 @@ function baseQueryView(){
  ov.querySelector("#bqc").onclick=close;ov.onclick=e=>{if(e.target===ov)close()};
  ov.querySelector("#bqk").onclick=()=>{i.select();try{navigator.clipboard.writeText(QDEFAULT)}catch(e){document.execCommand("copy")}};
  ov.onkeydown=e=>{if(e.key==="Enter"||e.key==="Escape"){e.preventDefault();e.stopPropagation();close()}else if(e.key==="Tab"){e.preventDefault()}}}
+/* the base query lives on the server (shared by the web page, the Android app and the CTRL+ALT+c panel); localStorage is only a cache */
+function bqCache(){try{if(QDEFAULT)localStorage.setItem("query-default",QDEFAULT);else localStorage.removeItem("query-default");localStorage.setItem("query-default-history",JSON.stringify(QHIST))}catch(e){}}
+function bqSync(){return api("/base-query").then(r=>{QDEFAULT=(r.query||"").trim();QHIST=Array.isArray(r.history)?r.history:[];bqCache();if(typeof renderList==="function")renderList()}).catch(()=>{})}
+function bqPush(){api("/base-query",{method:"POST",body:JSON.stringify({query:QDEFAULT})}).then(r=>{QHIST=Array.isArray(r.history)?r.history:QHIST;bqCache()}).catch(()=>{})}
+setTimeout(bqSync,0);addEventListener("focus",bqSync);
 function runDefaultCmd(raw){const m=DEFCMD.exec(raw);if(!m||m[1]==="!")return null;   // "!/bq" is only a view
  if(m[2]===undefined){baseQueryView();return""}
- const prev=QDEFAULT.trim();QDEFAULT=(m[3]||"").trim();if(QDEFAULT&&prev&&prev!==QDEFAULT&&QHIST.indexOf(prev)<0)QHIST=[prev].concat(QHIST);if(QDEFAULT){QHIST=[QDEFAULT].concat(QHIST.filter(x=>x!==QDEFAULT)).slice(0,100);try{localStorage.setItem("query-default-history",JSON.stringify(QHIST))}catch(e){}}try{if(QDEFAULT)localStorage.setItem("query-default",QDEFAULT);else localStorage.removeItem("query-default")}catch(e){}
+ const prev=QDEFAULT.trim();QDEFAULT=(m[3]||"").trim();if(QDEFAULT&&prev&&prev!==QDEFAULT&&QHIST.indexOf(prev)<0)QHIST=[prev].concat(QHIST);if(QDEFAULT)QHIST=[QDEFAULT].concat(QHIST.filter(x=>x!==QDEFAULT)).slice(0,100);bqCache();bqPush()
  return""}
 function visibleConvs(raw){return selectFor(effectiveQuery(raw))}
 function selectFor(q){
