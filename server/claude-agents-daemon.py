@@ -1706,8 +1706,9 @@ def rewind_start(session_id, line_no):
         box = _input_box_all_text(pane)
         if box is None:
             return None, "can't read the input box"
-        if box:
-            return None, "input box has text - clear it first (Esc Esc would discard it)"
+        if box and not clear_input_box(pane):
+            # whatever was typed is discarded on purpose: restoring wins over an unsent draft
+            return None, "couldn't clear the input box"
         opened = False
         try:
             _tmux_keys(pane, "Escape")
@@ -2920,7 +2921,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         m = re.match(r"^/api/v1/conversations/([0-9a-fA-F-]{36})/attachments$", path)
         if m:
             session_id = m.group(1)
-            if not find_conversation_path(session_id):
+            # a freshly spawned chat has a live pane but no transcript file until its first message
+            if not find_conversation_path(session_id) and not get_live_sessions().get(session_id) and session_id not in PENDING_SPAWNS:
                 return self._reject(404, "not found")
             if rate_limited(ip, "upload", limit=UPLOAD_RATE_LIMIT, window=60):
                 log(f"deny: upload rate limited {ip}")

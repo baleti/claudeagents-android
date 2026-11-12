@@ -26,6 +26,8 @@ button:hover{background:var(--sel)}
 #search{margin:2px 10px 8px;padding:8px 12px;border-radius:12px;border:1px solid var(--line);background:transparent;color:var(--txt);font:inherit;font-size:14px;outline:0}
 #search:focus{border-color:var(--accent,var(--inpl));background:var(--bg)}
 #cp,#hp{position:fixed;z-index:30;display:none;max-height:260px;overflow-y:auto;background:var(--bg);border:1px solid var(--line);border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.35);padding:4px;font-size:13px}
+#mm{position:fixed;z-index:40;display:none;background:var(--bg);border:1px solid var(--line);border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.35);padding:4px;font-size:13px;min-width:200px}
+#mm div{padding:7px 12px;border-radius:8px;cursor:pointer;white-space:nowrap}#mm div:hover{background:var(--sel)}
 #cp div,#hp div{display:flex;gap:10px;padding:5px 9px;border-radius:8px;cursor:pointer;white-space:nowrap}#cp div.sel,#hp div.sel{background:var(--sel)}#hp div{max-width:min(720px,92vw)}#hp div span{overflow:hidden;text-overflow:ellipsis}#hp .hd{color:var(--mut);font-size:11px;cursor:default}
 #xp{position:fixed;z-index:31;display:none;background:var(--bg);border:1px solid var(--line);border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.35);padding:10px;width:230px;font-size:13px}#xp .q{margin-bottom:8px;line-height:1.35}#xp .q small{display:block;color:var(--mut);font-size:12px;margin-top:2px}#xp .bt{display:flex;gap:8px}#xp button{flex:1;padding:8px;border-radius:10px;border:1px solid var(--line)}#xp #xpGo{background:#e5484d;color:#fff;border-color:#e5484d}
 #cp b{font-family:"Roboto Mono",ui-monospace,Consolas,monospace;font-weight:600}#cp span{color:var(--mut);overflow:hidden;text-overflow:ellipsis}
@@ -108,7 +110,7 @@ dialog select,dialog textarea{background:var(--inp);color:var(--txt);border:1px 
  <div id="nAcc"></div>
  <textarea id="nTxt" rows="4" placeholder="First message (optional)" style="width:100%;padding:8px;border-radius:8px"></textarea>
  <button id="nGo" style="background:var(--acc);color:#fff;margin-top:8px;width:100%">Start</button></div></dialog>
-<div id="xp"><div class="q">Exit this session?<small>Runs /exit and closes the shell window. Resume it later from the archive.</small></div><div class="bt"><button id="xpGo">Exit</button><button id="xpNo">Cancel</button></div></div><div id="cp"></div><div id="hp"></div>
+<div id="xp"><div class="q">Exit this session?<small>Runs /exit and closes the shell window. Resume it later from the archive.</small></div><div class="bt"><button id="xpGo">Exit</button><button id="xpNo">Cancel</button></div></div><div id="mm"></div><div id="cp"></div><div id="hp"></div>
 <div id="toast"></div>
 <script src="/dsl.js"></script>
 <script>
@@ -152,13 +154,13 @@ function ago(e){const d=Date.now()/1000-e;if(d<60)return"now";if(d<3600)return M
    the web API, so filters on them match nothing. /ft /at /rt /g are parsed and inert here, as in the panel. */
 const TYPES=["title","status","tokens","msgs","age","path","account","fts"];   // "fts" is a filter, never a /s key
 const SCHEMA=window.DSL?DSL.makeSchema(TYPES,[],[]):null;
-const FTS_RE=/(^|\s)(!?)\/fts(?:\/([a-z,-]+))?(?=\s|$)(?:\s+("[^"]*"|(?!\/)\S+))?/g;   // same token as the panel's
+const FTS_RE=/(^|\s)(!?)\/fts(?:\/([a-z,-]+))?(?=\s|$)(?:\s+((?:"[^"]*"|(?!\/)\S+)(?:\s+(?!\/)\S+)*))?/g;   // same token as the panel's
 const FTSH={};   // lower-case term -> {session_id: score} once fetched, null while pending
 function ftsScope(keys){if(!keys)return{live:true,archive:true};const r=DSL.resolveNames(keys,["claude-live","claude-archive","tmux"]);return{live:r.indexOf("claude-live")>=0,archive:r.indexOf("claude-archive")>=0}}
 function ftsScopes(q){let u=null,m;FTS_RE.lastIndex=0;
  while((m=FTS_RE.exec(q))!==null){const s=ftsScope(m[3]);u=u?{live:u.live||s.live,archive:u.archive||s.archive}:s}
  return u}
-const rewriteFts=q=>q.replace(FTS_RE,(all,lead,neg,sc,arg)=>arg?lead+neg+"/fv/fts "+arg.replace(/"/g,""):lead);   // `/fts words` is sugar for `/fv/fts words`
+const rewriteFts=q=>q.replace(FTS_RE,(all,lead,neg,sc,arg)=>arg?lead+neg+"/fv/fts \""+arg.replace(/"/g,"")+"\"":lead);   // `/fts words` is sugar for `/fv/fts words`
 const rowOf=c=>({title:c.title||"",status:c.live?(c.live.status||"live"):"archive",tokens:c.tokens!=null?String(c.tokens):"",
  msgs:c.msgs!=null?String(c.msgs):"",age:Math.max(0,Math.floor(Date.now()/1000-c.mtime))+"s",   // "<n>s": /s/age = newest first, as in the panel
  path:(c.cwd||"").replace(/^\/home\/[^/]+(?=\/|$)/,"~"),
@@ -186,7 +188,12 @@ function renderList(){
   <div class="rb"><div class="r1"><span class="rt">${esc(c.title||"(untitled)")}</span><span class="rm">${ago(c.mtime)}</span></div>
   <div class="r2"><span class="rs">${esc(c.account_label||c.account)}${c.context_pct!=null?" · ctx "+c.context_pct+"%":""}${st?" · "+esc(st):""}</span></div></div>`;
   d.onclick=()=>open(c);$("list").appendChild(d)})}
-async function loadList(){try{convs=(await api("/conversations")).sort((a,b)=>b.mtime-a.mtime);renderList();$("hs").textContent=convs.filter(c=>c.live).length+" live · "+convs.length+" chats"}catch(e){}}
+// sessions closed with Exit are kept out of the list (they stay in the archive) until they are live again or get new activity
+let EXITED={};try{EXITED=JSON.parse(localStorage.getItem("exited")||"{}")}catch(e){}
+const wasExited=c=>EXITED[c.id]!==undefined&&!c.live&&c.mtime<=EXITED[c.id]+60;
+function markExited(id){EXITED[id]=Date.now()/1000;try{localStorage.setItem("exited",JSON.stringify(EXITED))}catch(e){}
+ convs=convs.filter(c=>c.id!==id);renderList();$("hs").textContent=convs.filter(c=>c.live).length+" live · "+convs.length+" chats"}
+async function loadList(){try{convs=(await api("/conversations")).filter(c=>!wasExited(c)).sort((a,b)=>b.mtime-a.mtime);renderList();$("hs").textContent=convs.filter(c=>c.live).length+" live · "+convs.length+" chats"}catch(e){}}
 // one-line headline of a tool call / result: the first meaningful line, fences and the arrow stripped
 function headline(t){const ls=String(t||"").split("\n");let head="";
  for(let l of ls){const raw=l.trim();if(!raw)continue;
@@ -203,25 +210,55 @@ function bubble(m){
  d.innerHTML=(role=="tool"?`<span class="hl">${esc(headline(m.text))}</span>`:"")+`<div class="tx">${md(m.text)}</div><div class="ts">${hm(m.ts)}</div>`;
  if(role=="tool")d.onclick=()=>d.classList.toggle("open");
  if(role=="me")d.dataset.raw=String(m.text||"").replace(/^\[(?:image|file) attached:[^\]]*\]\n?/,"");
- if(role=="me")d.onclick=()=>{if(String(getSelection()||"").length)return;toggleFold(d)};
+ if(role=="me")d.onclick=e=>{if(String(getSelection()||"").length)return;msgMenu(d,e,true)};
  d.dataset.line=m.line;return d}
+/* ---- click a message: a small menu. Fold / unfold (my messages: hides the response under it) and Restore conversation to here
+   (same as the Android tap menu: a live session is rewound through the TUI's own rewind picker, a closed one is cut back on disk) ---- */
+function mmClose(){$("mm").style.display="none"}
+function msgMenu(d,e,mine){e.stopPropagation();const m=$("mm");m.innerHTML="";
+ const add=(t,f)=>{const i=document.createElement("div");i.textContent=t;i.onclick=ev=>{ev.stopPropagation();mmClose();f()};m.appendChild(i)};
+ if(mine)add(d.classList.contains("folded")?"Unfold":"Fold",()=>toggleFold(d));
+ add("Restore conversation to here",()=>restoreTo(+d.dataset.line));
+ m.style.display="block";m.style.left=Math.max(8,Math.min(innerWidth-m.offsetWidth-8,e.clientX))+"px";m.style.top=Math.max(8,Math.min(innerHeight-m.offsetHeight-8,e.clientY))+"px"}
+addEventListener("mousedown",e=>{if(!e.target.closest("#mm"))mmClose()});
+addEventListener("keydown",e=>{if(e.key==="Escape")mmClose()});
+async function restoreTo(line){if(!cur||!(line>=0))return;
+ const id=cur.id,c=convs.find(x=>x.id===id)||cur;
+ if(c.live){ // live: the daemon drives the rewind picker up to its confirm screen and returns its options as a question card
+  try{toast("Opening rewind…");const r=await api("/conversations/"+id+"/rewind",{method:"POST",body:JSON.stringify({line})});REWIND_ID=r.question&&r.question.id;showQ(r.question)}
+  catch(e){toast("Rewind not started: "+String(e.message).slice(0,120))}return}
+ if(!confirm("Restore conversation to this message?\n\nThe transcript is backed up first, then cut back to here."))return;
+ try{await api("/conversations/"+id+"/restore",{method:"POST",body:JSON.stringify({line})});toast("Conversation restored");reloadChat()}
+ catch(e){toast("Restore failed: "+String(e.message).slice(0,120))}}
+let REWIND_ID=null;
+function reloadChat(){if(!cur)return;const c=cur;setTimeout(()=>{if(cur&&cur.id===c.id){last=0;open(c)}},1200)}
 // clicking one of my messages folds / unfolds the whole response under it (everything up to my next message)
 function foldCount(d){let n=0;for(let x=d.nextElementSibling;x&&!x.classList.contains("me");x=x.nextElementSibling)if(x.id!="pend"&&!x.classList.contains("sending"))n++;return n}
 function toggleFold(d){const f=!d.classList.contains("folded");d.classList.toggle("folded",f);
  let n=0;for(let x=d.nextElementSibling;x&&!x.classList.contains("me");x=x.nextElementSibling){x.hidden=f;n++}
  d.dataset.hid=n}
+let lastDay="";
+function dayLabel(ts){const d=new Date(ts);if(isNaN(d))return"";const t=new Date(),y=new Date(t.getTime()-864e5),same=(a,b)=>a.toDateString()===b.toDateString();
+ if(same(d,t))return"Today";if(same(d,y))return"Yesterday";
+ return d.toLocaleDateString([],{weekday:"short",day:"numeric",month:"short",...(d.getFullYear()!==t.getFullYear()?{year:"numeric"}:{})})}
 function addMsgs(ms){
  const box=$("msgs"),atBot=box.scrollHeight-box.scrollTop-box.clientHeight<120;
  if($("empty"))$("empty").remove();
  if(ms.length&&$("pend"))$("pend").remove();
  ms.forEach(m=>{if(m.line>last){const b=bubble(m);
   if(m.role=="user"){const n=String(m.text||"").trim();const q=[...box.querySelectorAll(".sending")].find(x=>x.dataset.t==n);if(q)q.remove()}   // my own follow-up has landed in the transcript
-  const sp=box.querySelector(".sending");if(sp)box.insertBefore(b,sp);else box.appendChild(b);last=m.line;
+  const sp=box.querySelector(".sending");
+  // a date line whenever the day changes (and before the first message); hovering a message shows its exact date and time
+  let dv=null;const dk=m.ts?new Date(m.ts).toDateString():"";
+  if(dk&&dk!==lastDay&&dk!=="Invalid Date"){lastDay=dk;dv=document.createElement("div");dv.className="day";dv.textContent=dayLabel(m.ts);dv.title=new Date(m.ts).toLocaleDateString([],{dateStyle:"full"})}
+  if(m.ts){const d=new Date(m.ts);if(!isNaN(d))b.title=d.toLocaleString([],{weekday:"short",day:"numeric",month:"short",year:"numeric",hour:"2-digit",minute:"2-digit"})}
+  if(dv){if(sp)box.insertBefore(dv,sp);else box.appendChild(dv)}
+  if(sp)box.insertBefore(b,sp);else box.appendChild(b);last=m.line;
   if(!b.classList.contains("me")){let u=b.previousElementSibling;while(u&&!u.classList.contains("me"))u=u.previousElementSibling;   // new reply under a folded message stays folded
-   if(u&&u.classList.contains("folded")){b.hidden=true;u.dataset.hid=(+u.dataset.hid||0)+1}}}});
+   if(u&&u.classList.contains("folded")){b.hidden=true;if(dv)dv.hidden=true;u.dataset.hid=(+u.dataset.hid||0)+1}}}});
  if(atBot)box.scrollTop=box.scrollHeight}
 async function open(c){
- pics.forEach(p=>URL.revokeObjectURL(p.url));pics=[];renderPics(); cur=c;try{history.replaceState(null,"","#/chat/"+c.id)}catch(e){}$("bExit").style.display="";last=0;polling++;document.body.classList.add("chat");
+ pics.forEach(p=>URL.revokeObjectURL(p.url));pics=[];renderPics(); lastDay="";cur=c;try{history.replaceState(null,"","#/chat/"+c.id)}catch(e){}$("bExit").style.display="";last=0;polling++;document.body.classList.add("chat");
  $("ct").firstChild.textContent=c.title||"(untitled)";$("cs").textContent=c.account_label||"";
  const pend=$("pend");$("msgs").innerHTML="";if(pend)$("msgs").appendChild(pend);$("inp").disabled=false;$("send").disabled=false;$("ask").style.display="none";renderList();
  try{const r=await api(`/conversations/${c.id}/messages?since=0`);addMsgs(r.messages);$("msgs").scrollTop=$("msgs").scrollHeight}catch(e){}
@@ -237,15 +274,18 @@ async function poll(gen){
    showQ(r.question);
   }catch(e){if(e.message=="auth")return;await new Promise(r=>setTimeout(r,last?3000:800))}}}
 function showQ(q){
- const a=$("ask");if(!q||!q.questions){a.style.display="none";return}
+ const a=$("ask");if(!q||!q.questions){a.style.display="none";a.dataset.qid="";return}
+ // the poll hands back the same question every few seconds: rebuilding the buttons under the pointer swallows the click
+ if(a.dataset.qid===String(q.id)&&a.style.display==="block"&&a.dataset.cid===String(cur&&cur.id))return;
+ a.dataset.qid=String(q.id);a.dataset.cid=String(cur&&cur.id);
  a.style.display="block";a.innerHTML="";
  const qs=q.questions;const picked=qs.map(()=>[]);
  qs.forEach((x,i)=>{const h=document.createElement("div");h.innerHTML="<b>"+esc(x.question||"")+"</b>";a.appendChild(h);
   (x.options||[]).forEach(o=>{const b=document.createElement("button");b.className="opt";b.textContent=o.label||o;
    b.onclick=async()=>{picked[i]=[o.label||o];if(qs.length==1||picked.every(p=>p.length)){
-     try{await api(`/conversations/${cur.id}/answer`,{method:"POST",body:JSON.stringify({tool_use_id:q.id,answers:picked.map(s=>({selected:s}))})});a.style.display="none"}catch(e){toast("Answer failed: "+e.message)}}else b.style.background="var(--acc)"};
+     try{await api(`/conversations/${cur.id}/answer`,{method:"POST",body:JSON.stringify({tool_use_id:q.id,answers:picked.map(s=>({selected:s}))})});a.style.display="none";a.dataset.qid="";if(String(q.id).startsWith("rewind:"))reloadChat()}catch(e){toast("Answer failed: "+e.message)}}else b.style.background="var(--acc)"};
    a.appendChild(b)})});
- const dm=document.createElement("button");dm.className="opt";dm.textContent="Dismiss";dm.onclick=async()=>{try{await api(`/conversations/${cur.id}/answer`,{method:"POST",body:JSON.stringify({tool_use_id:q.id,dismiss:true})});a.style.display="none"}catch(e){toast(e.message)}};a.appendChild(dm)}
+ const dm=document.createElement("button");dm.className="opt";dm.textContent="Dismiss";dm.onclick=async()=>{try{await api(`/conversations/${cur.id}/answer`,{method:"POST",body:JSON.stringify({tool_use_id:q.id,dismiss:true})});a.style.display="none";a.dataset.qid=""}catch(e){toast(e.message)}};a.appendChild(dm)}
 let pics=[];
 function renderPics(){const el=$("pics");el.classList.toggle("on",pics.length>0);el.innerHTML="";
  pics.forEach((p,i)=>{const d=document.createElement("div");d.className="pic";const im=new Image();im.src=p.url;d.appendChild(im);
@@ -363,9 +403,12 @@ addEventListener("mousedown",e=>{if(!e.target.closest("#xp,#bExit"))xpClose()});
 addEventListener("keydown",e=>{if(e.key==="Escape")xpClose()});
 $("xpGo").onclick=async()=>{xpClose();if(!cur)return;
  const b=$("bExit");b.disabled=true;
- try{await api("/conversations/"+cur.id+"/exit",{method:"POST",body:"{}"});toast("Session exited")}
- catch(e){if(/not live|409/i.test(e.message))toast("Session already exited");else toast("Exit failed: "+e.message)}
- b.disabled=false;loadList()};
+ const id=cur.id;let done=false;
+ try{await api("/conversations/"+id+"/exit",{method:"POST",body:"{}"});toast("Session exited");done=true}
+ catch(e){if(/not live|409/i.test(e.message)){toast("Session already exited");done=true}else toast("Exit failed: "+e.message)}
+ b.disabled=false;
+ if(done&&cur&&cur.id===id){markExited(id);$("back").onclick()}   // gone from the left pane at once, and back to the empty main screen
+ else loadList()};
 $("back").onclick=()=>{try{history.replaceState(null,"",location.pathname+location.search)}catch(e){}$("bExit").style.display="none";document.body.classList.remove("chat");polling++;cur=null;renderList()};
 function fmtReset(s){if(!s)return"";const d=(new Date(s)-Date.now())/60000;if(d<=0)return"resets now";return d<120?"resets in "+Math.round(d)+" min":d<2880?"resets in "+Math.round(d/60)+" h":"resets in "+Math.round(d/1440)+" d"}
 const cls=p=>p>=90?"x":p>=70?"w":"";
