@@ -10,7 +10,10 @@ data class ConversationRow(
     val tokens: Int?,
     val livePane: String?,
     // "busy" | "idle" | "waiting" | "frozen" | "stopped" | null (unknown)
-    val liveStatus: String? = null
+    val liveStatus: String? = null,
+    // from the daemon's claude-fts-index meta (null if unindexed)
+    val msgs: Int? = null,
+    val cwd: String? = null
 ) {
     val isLive: Boolean get() = livePane != null
 }

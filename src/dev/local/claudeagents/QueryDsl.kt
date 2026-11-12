@@ -97,7 +97,10 @@ class SuggestionRowAdapter(private val context: Context, private val data: List<
  */
 object QueryDsl {
 
-    enum class Field(val fieldName: String) { TITLE("title"), ACCOUNT("account"), TOKENS("tokens"), AGE("age") }
+    enum class Field(val fieldName: String) { TITLE("title"), STATUS("status"), TOKENS("tokens"), MSGS("msgs"), AGE("age"), PATH("path"), ACCOUNT("account") }
+
+    /** `/fts` hits fetched from the relay: lower-case term -> session ids (absent = not fetched yet). */
+    val ftsHits = java.util.concurrent.ConcurrentHashMap<String, Set<String>>()
 
     data class Suggestion(val label: String, val alias: String?, val description: String, val insertText: String)
 
@@ -108,15 +111,85 @@ object QueryDsl {
     // the popup, matching the app-launcher precedent in the doc.
     private val ACTIVE_VERBS = listOf(
         VerbInfo("fv", "filter-value", "keep rows whose value matches (substring)"),
-        VerbInfo("s", "sort", "order rows by the keys, /s/key,key/desc")
+        VerbInfo("s", "sort", "order rows by the keys, /s/key,key/desc"),
+        VerbInfo("fts", "full-text-search", "full text of every conversation, live and archived: /fts words up to the next /verb"),
+        VerbInfo("bq", "base-query", "base query: rest of the line runs as usual; Enter saves it as the query run in front of every query (/bq alone + Enter shows the current one)")
     )
+
+    // ---- base query (/base-query, see query-dsl.md) ----
+    private const val DEFAULT_PREFS = "claudeagents_query_default"
+    private val DEFAULT_CMD = Regex("^\\s*/(?:base-query|bq)(?:(\\s+)(.*))?$", RegexOption.DOT_MATCHES_ALL)
+
+    /** The stored base query: written in front of every typed query, as if the user had typed it. */
+    @Volatile var defaultQuery: String = ""
+    /** Every non-empty base query ever set, most recent first. */
+    @Volatile var baseHistory: List<String> = emptyList()
+    private val BQ_REST = Regex("^(\\s*/(?:base-query|bq)\\s+)(.*)$", RegexOption.DOT_MATCHES_ALL)
+
+    /** Current base query first (if set), then the previous ones. */
+    fun baseCandidates(): List<String> {
+        val cur = defaultQuery.trim()
+        return (if (cur.isEmpty()) emptyList() else listOf(cur)) + baseHistory.filter { it != cur }
+    }
+
+    fun loadDefault(context: Context) {
+        val sp = context.getSharedPreferences(DEFAULT_PREFS, Context.MODE_PRIVATE)
+        defaultQuery = sp.getString("query", "") ?: ""
+        baseHistory = (sp.getString("history", "") ?: "").split("\n").filter { it.isNotEmpty() }
+    }
+
+    /**
+     * What actually runs. As the first token, `/base-query` is transparent: the rest of the line is the query and the
+     * stored [defaultQuery] is NOT applied (Enter replaces it). Otherwise [defaultQuery] + typed text.
+     */
+    fun effective(typed: String): String {
+        DEFAULT_CMD.matchEntire(typed)?.let { return it.groupValues[2] }
+        return if (defaultQuery.isBlank()) typed else if (typed.isBlank()) defaultQuery else defaultQuery.trim() + " " + typed
+    }
+
+    /**
+     * Enter in a search box. If [typed] is the `/base-query` command (first token only): bare `/bq` shows the
+     * current base query in a read-only dialog (selectable text, Copy button) and returns ""; `/bq <q>` stores q as
+     * the base query (empty clears) and returns "". Either way the caller clears the box with the returned text.
+     * Returns null if [typed] is not the command (nothing done).
+     */
+    fun runDefaultCommand(activity: android.app.Activity, typed: String): String? {
+        val m = DEFAULT_CMD.matchEntire(typed) ?: return null
+        if (m.groupValues[1].isEmpty()) {
+            val tv = android.widget.TextView(activity)
+            tv.text = if (defaultQuery.isEmpty()) "(none set)\n\nType /bq <query> and Enter to set one." else defaultQuery
+            tv.setTextIsSelectable(true)
+            tv.setPadding(48, 24, 48, 0)
+            tv.textSize = 16f
+            android.app.AlertDialog.Builder(activity)
+                .setTitle("Base query")
+                .setView(tv)
+                .setPositiveButton("Close", null)
+                .setNeutralButton("Copy") { _, _ ->
+                    val cm = activity.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("base query", defaultQuery))
+                }
+                .show()
+            return ""
+        }
+        val prev = defaultQuery.trim()
+        defaultQuery = m.groupValues[2].trim()
+        if (defaultQuery.isNotEmpty() && prev.isNotEmpty() && prev != defaultQuery && prev !in baseHistory) baseHistory = listOf(prev) + baseHistory
+        if (defaultQuery.isNotEmpty()) baseHistory = (listOf(defaultQuery) + baseHistory.filter { it != defaultQuery }).take(100)
+        activity.getSharedPreferences(DEFAULT_PREFS, Context.MODE_PRIVATE).edit()
+            .putString("query", defaultQuery).putString("history", baseHistory.joinToString("\n")).apply()
+        return ""
+    }
 
     private data class FieldInfo(val field: Field, val description: String)
     private val FIELD_INFO = listOf(
         FieldInfo(Field.TITLE, "conversation title"),
-        FieldInfo(Field.ACCOUNT, "which of the 3 accounts (1/2/3)"),
+        FieldInfo(Field.STATUS, "busy / idle / waiting / archive"),
         FieldInfo(Field.TOKENS, "context-window token count"),
-        FieldInfo(Field.AGE, "time since last activity")
+        FieldInfo(Field.MSGS, "message count"),
+        FieldInfo(Field.AGE, "time since last activity"),
+        FieldInfo(Field.PATH, "working directory"),
+        FieldInfo(Field.ACCOUNT, "which of the 3 accounts (1/2/3)")
     )
 
     private val VERB_ALIASES = mapOf(
@@ -124,7 +197,8 @@ object QueryDsl {
         "ft" to "ft", "filter-type" to "ft",
         "at" to "at", "add-type" to "at",
         "rt" to "rt", "remove-type" to "rt",
-        "s" to "s", "sort" to "s"
+        "s" to "s", "sort" to "s",
+        "fts" to "fts", "full-text-search" to "fts"
     )
 
     private data class Token(val raw: String, val isQuoted: Boolean, val spanStart: Int, val unterminated: Boolean = false, val neg: Boolean = false)
@@ -208,6 +282,9 @@ object QueryDsl {
         Field.ACCOUNT -> ConversationColumns.accountNumber(row.account)
         Field.TOKENS -> Fmt.tokens(row.tokens)
         Field.AGE -> Fmt.ago(row.mtime)
+        Field.STATUS -> if (row.isLive) (row.liveStatus ?: "live") else "archive"
+        Field.MSGS -> row.msgs?.toString() ?: ""
+        Field.PATH -> (row.cwd ?: "").replace(Regex("^/home/[^/]+(?=/|$)"), "~")
     }
 
     // Plain integers/timestamps compare numerically, not lexicographically
@@ -221,6 +298,9 @@ object QueryDsl {
         Field.ACCOUNT -> compareBy { ConversationColumns.accountNumber(it.account) }
         Field.TOKENS -> compareBy { it.tokens ?: -1 }
         Field.AGE -> compareBy { it.mtime }
+        Field.STATUS -> compareBy { if (it.isLive) (it.liveStatus ?: "live") else "archive" }
+        Field.MSGS -> compareBy { it.msgs ?: -1 }
+        Field.PATH -> compareBy { (it.cwd ?: "").lowercase() }
     }
 
     /** Substring containment; with [exact] (a terminated "quoted" term) the value must stand alone - no
@@ -245,18 +325,55 @@ object QueryDsl {
         return false
     }
 
-    private class FilterTerm(val fields: List<Field>?, val alwaysFalse: Boolean, val value: String, val neg: Boolean = false, val exact: Boolean = false) {
+    private class FilterTerm(val fields: List<Field>?, val alwaysFalse: Boolean, val value: String, val neg: Boolean = false, val exact: Boolean = false,
+                             val fts: Boolean = false) {
         // A negated term keeps exactly the rows its positive form drops
         // (so an unresolvable path, which matches nothing, negates to "keep").
         fun matches(row: ConversationRow): Boolean = positive(row) != neg
         private fun positive(row: ConversationRow): Boolean {
             if (alwaysFalse) return false
+            if (fts) return ftsHits[value.lowercase()]?.contains(row.id) == true
             val flds = fields ?: return containsTerm(row.title, value, exact)
             return flds.any { containsTerm(displayValue(row, it), value, exact) }
         }
     }
 
-    fun apply(all: List<ConversationRow>, query: String): List<ConversationRow> {
+    /** Terms of every `/fts` in [query] that still need fetching from the relay (not in [ftsHits] yet). */
+    fun pendingFtsTerms(typed: String): List<String> {
+        val tokens = tokenize(effective(typed))
+        val out = mutableListOf<String>()
+        var idx = 0
+        while (idx < tokens.size) {
+            val p = parseVerbToken(tokens[idx])
+            if (p != null && p.verb == "fts") {
+                val words = mutableListOf<String>()
+                var j = idx + 1
+                while (j < tokens.size && !isVerbArgToken(tokens[j])) { words.add((if (tokens[j].neg) "!" else "") + tokens[j].raw); j++ }
+                val t = words.joinToString(" ").lowercase()
+                if (t.isNotEmpty() && !ftsHits.containsKey(t) && t !in out) out.add(t)
+                idx = j
+            } else idx++
+        }
+        return out
+    }
+
+    private val ftsInFlight = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** Fetches any `/fts` terms in [query] the relay hasn't answered yet, then calls [onDone] on the UI thread so the caller re-applies. */
+    fun fetchFts(activity: android.app.Activity, query: String, onDone: () -> Unit) {
+        for (term in pendingFtsTerms(query)) {
+            if (!ftsInFlight.add(term)) continue
+            Thread {
+                val ids = try { RelayClient(activity).fts(term).keys } catch (e: Exception) { null }
+                if (ids != null) ftsHits[term] = ids   // a failed fetch is left unset so the next keystroke retries
+                ftsInFlight.remove(term)
+                activity.runOnUiThread { onDone() }
+            }.apply { isDaemon = true; name = "QueryDslFts"; start() }
+        }
+    }
+
+    fun apply(all: List<ConversationRow>, typed: String): List<ConversationRow> {
+        val query = effective(typed)
         if (query.isBlank()) return all
         val tokens = tokenize(query)
         if (tokens.isEmpty()) return all
@@ -266,6 +383,8 @@ object QueryDsl {
         var sortInert = false
         var hasSort = false
         var sortDescending = false
+        var ftsLive = false
+        var ftsArchive = false
 
         var idx = 0
         while (idx < tokens.size) {
@@ -284,6 +403,20 @@ object QueryDsl {
                 continue
             }
             val (verb, via, dirPart, bad) = parsed
+            if (verb == "fts") {
+                // `/fts[/live|/archive] words`: every word up to the next /verb is one full-text query
+                // (same rule as the web page and the desktop panel, query-dsl.md "App verbs")
+                val words = mutableListOf<String>()
+                var j = idx + 1
+                while (j < tokens.size && !isVerbArgToken(tokens[j])) { words.add((if (tokens[j].neg) "!" else "") + tokens[j].raw); j++ }
+                val known = listOf("claude-live", "claude-archive", "tmux")
+                val keys = (via ?: "").lowercase().split(",").filter { it.isNotEmpty() }
+                val hit = known.filter { n -> keys.any { k -> if (known.any { it == k }) n == k else n.contains(k) } }
+                if (keys.isNotEmpty()) { ftsLive = ftsLive || "claude-live" in hit; ftsArchive = ftsArchive || "claude-archive" in hit } else { ftsLive = true; ftsArchive = true }
+                if (words.isNotEmpty()) filterTerms.add(FilterTerm(null, false, words.joinToString(" "), tok.neg, false, true))
+                idx = j
+                continue
+            }
             // keyless or malformed: inert, takes no argument ("/fv foo" is just "foo")
             if (via == null || bad) {
                 idx += 1
@@ -331,6 +464,7 @@ object QueryDsl {
         }
 
         var rows = if (filterTerms.isEmpty()) all else all.filter { row -> filterTerms.all { it.matches(row) } }
+        if (ftsLive || ftsArchive) rows = rows.filter { if (it.isLive) ftsLive else ftsArchive }
 
         if (hasSort && !sortInert && sortChain != null) {
             val chain = sortChain
@@ -381,6 +515,14 @@ object QueryDsl {
     // after "/fv ") to the end -- a single contiguous replacement, never a
     // cross-token rewrite.
     fun suggestions(all: List<ConversationRow>, query: String): List<Suggestion> {
+        // "/bq <frag>": the base-query history (current first), prefix-filtered by <frag>; falls through when nothing matches
+        BQ_REST.matchEntire(query)?.let { m ->
+            val frag = m.groupValues[2].trim()
+            val cur = defaultQuery.trim()
+            val hits = baseCandidates().filter { it.startsWith(frag) }
+                .map { Suggestion(it, null, if (it == cur) "current" else "previous", it) }
+            if (hits.isNotEmpty()) return hits
+        }
         val trailingSpace = query.isNotEmpty() && query.last().isWhitespace()
         val tokens = tokenize(query)
         if (tokens.isEmpty()) return emptyList()
@@ -390,8 +532,9 @@ object QueryDsl {
         // Stage 1: a fresh command -- current token starts with "/", no second "/" yet.
         if (current != null && !current.isQuoted && current.raw.startsWith("/") && !current.raw.substring(1).contains("/")) {
             val frag = current.raw.substring(1).lowercase()
-            return ACTIVE_VERBS.filter { it.short.contains(frag) }
-                .map { Suggestion("/${it.short}", "/${it.long}", it.description, "/${it.short}/") }
+            // /bq is a command, not a pipeline stage: only the very first token of the query
+            return ACTIVE_VERBS.filter { it.short.contains(frag) && (tokens.size == 1 || it.short != "bq") }
+                .map { Suggestion("/${it.short}", "/${it.long}", it.description, if (it.short == "bq") "/${it.short} " else "/${it.short}/") }
         }
 
         // Stage 2: keys -- being typed after "/fv/", "//" or "/s/" (the fragment after the last comma),
@@ -432,6 +575,9 @@ object QueryDsl {
 
     // Where a completion's insertText should splice in -- see suggestions().
     fun replaceFrom(query: String): Int {
+        BQ_REST.matchEntire(query)?.let { m ->
+            if (baseCandidates().any { it.startsWith(m.groupValues[2].trim()) }) return m.groupValues[1].length
+        }
         val trailingSpace = query.isNotEmpty() && query.last().isWhitespace()
         if (trailingSpace) return query.length
         val tokens = tokenize(query)

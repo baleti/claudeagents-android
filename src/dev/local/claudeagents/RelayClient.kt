@@ -73,6 +73,16 @@ class RelayClient(context: Context) {
 
     fun getAccounts(): JSONArray = requestArray("GET", "/api/v1/accounts")
 
+    fun getUsage(): JSONObject = request("GET", "/api/v1/usage", null)
+
+    /** Full-text hits for [q] over every conversation (live + archived): session id -> score. */
+    fun fts(q: String): Map<String, Double> {
+        val hits = request("GET", "/api/v1/fts?q=" + java.net.URLEncoder.encode(q, "UTF-8"), null, 40000).optJSONObject("hits") ?: return emptyMap()
+        val out = HashMap<String, Double>()
+        for (k in hits.keys()) out[k] = hits.optDouble(k, 0.0)
+        return out
+    }
+
     fun getConversations(): JSONArray = requestArray("GET", "/api/v1/conversations")
 
     fun getMessages(sessionId: String, since: Int): JSONObject =
@@ -100,6 +110,9 @@ class RelayClient(context: Context) {
         val body = JSONObject()
         body.put("account", account)
         body.put("text", text)
+        // async: the daemon answers as soon as the tmux session exists and boots/primes it in the background
+        // (older daemons ignore the flag and answer when the transcript exists, as before).
+        body.put("async", true)
         return request("POST", "/api/v1/spawn", body, readTimeoutMs = 25000)
     }
 
@@ -240,7 +253,9 @@ class RelayClient(context: Context) {
                         lineCount = c.optInt("line_count", 0),
                         tokens = if (c.isNull("tokens")) null else c.optInt("tokens"),
                         livePane = live?.optString("pane"),
-                        liveStatus = if (live == null || live.isNull("status")) null else live.optString("status")
+                        liveStatus = if (live == null || live.isNull("status")) null else live.optString("status"),
+                        msgs = if (c.isNull("msgs")) null else c.optInt("msgs"),
+                        cwd = if (c.isNull("cwd")) null else c.optString("cwd")
                     )
                 )
             }

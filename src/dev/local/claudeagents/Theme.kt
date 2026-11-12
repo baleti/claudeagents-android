@@ -109,7 +109,7 @@ object Theme {
     // message"). Null (every other caller -- overflow menus with no
     // specific tap point) keeps the original anchor-edge behavior
     // unchanged.
-    fun showMenu(context: Context, anchor: View, items: List<String>, tapX: Int? = null, tapY: Int? = null, hPadDp: Int = 20, alignEnd: Boolean = false, onSelect: (String) -> Unit) {
+    fun showMenu(context: Context, anchor: View, items: List<String>, tapX: Int? = null, tapY: Int? = null, hPadDp: Int = 20, alignEnd: Boolean = false, onSelect: (String) -> Unit): (List<String>) -> Unit {
         val container = LinearLayout(context)
         container.orientation = LinearLayout.VERTICAL
         container.background = roundedDrawable(popupSurface, context, radiusDp = 12, strokeColor = primary)
@@ -123,6 +123,12 @@ object Theme {
         popup.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
         popup.elevation = dp(context, 12).toFloat()
 
+        // Returned updater swaps row texts in place (e.g. usage figures arriving after the menu is already open).
+        val current = items.toMutableList()
+        val rowViews = ArrayList<TextView>()
+        val updater: (List<String>) -> Unit = { fresh ->
+            for (i in rowViews.indices) if (i < fresh.size) { current[i] = fresh[i]; rowViews[i].text = fresh[i] }
+        }
         for ((i, item) in items.withIndex()) {
             if (i > 0) {
                 val divider = View(context)
@@ -131,6 +137,7 @@ object Theme {
             }
             val row = TextView(context)
             row.text = item
+            rowViews.add(row)
             row.textSize = 14f
             row.setTypeface(null, Typeface.BOLD)
             row.gravity = Gravity.CENTER_VERTICAL
@@ -140,7 +147,7 @@ object Theme {
             row.isClickable = true
             row.setOnClickListener {
                 popup.dismiss()
-                onSelect(item)
+                onSelect(current[i])
             }
             container.addView(row, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
         }
@@ -186,7 +193,7 @@ object Theme {
             // showAsDropDown's offsets are relative to the anchor's own
             // bottom-left corner, not absolute screen coordinates.
             popup.showAsDropDown(anchor, absX - anchorLoc[0], absY - (anchorLoc[1] + anchor.height))
-            return
+            return updater
         }
 
         val spaceBelow = visibleFrame.bottom - (anchorLoc[1] + anchor.height)
@@ -194,5 +201,6 @@ object Theme {
         // alignEnd: popup's right edge flush with the anchor's right edge.
         val xOffset = if (alignEnd) (anchor.width - popupWidth).coerceAtLeast(visibleFrame.left - anchorLoc[0]) else 0
         popup.showAsDropDown(anchor, xOffset, yOffset)
+        return updater
     }
 }

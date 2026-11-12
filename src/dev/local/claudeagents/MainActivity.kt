@@ -559,6 +559,13 @@ class MainActivity : Activity() {
         searchInput.hint = "Search… (/fv /s, see query-dsl.md)"
         searchInput.setSingleLine(true)
         searchInput.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
+        QueryDsl.loadDefault(this)
+        // Enter on "/base-query": bare = load the current base query into the box; with text = save it
+        searchInput.setOnEditorActionListener { _, _, _ ->
+            val r = QueryDsl.runDefaultCommand(this, searchInput.text.toString())
+            if (r != null) { searchInput.setText(r); searchInput.setSelection(r.length) }
+            r != null
+        }
         Theme.styleEditText(searchInput, this)
         val searchParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         searchRow.addView(searchInput, searchParams)
@@ -601,9 +608,37 @@ class MainActivity : Activity() {
         newButtonParams.marginStart = dp(8)
         newButtonParams.gravity = Gravity.CENTER_VERTICAL
         newButton.setOnClickListener {
-            Theme.showMenu(this, newButton, listOf("claude1", "claude2", "claude3", "claude4", "claude5", "claude6", "claude7", "claude8"), hPadDp = 10, alignEnd = true) { picked ->
-                spawnEmptySession(when (picked) { "claude1" -> "claude"; else -> picked })
+            // Each entry carries that account's session/weekly usage, so the
+            // spawn menu doubles as the usage view. The menu opens at once
+            // with the last cached figures (plain names if none yet); a fresh
+            // fetch updates the rows in place when it arrives, and a slow or
+            // failed fetch (spotty connection) just leaves the cache showing.
+            val keys = listOf("claude", "claude2", "claude3", "claude4", "claude5", "claude6", "claude7", "claude8")
+            val prefs = getSharedPreferences("usage_cache", MODE_PRIVATE)
+            fun labelsFor(pct: Map<String, String>) = keys.mapIndexed { i, k -> "claude${i + 1}" + (pct[k]?.let { "   $it" } ?: "") }
+            val cached = HashMap<String, String>()
+            try {
+                val o = org.json.JSONObject(prefs.getString("pct", "{}") ?: "{}")
+                for (k in o.keys()) cached[k] = o.getString(k)
+            } catch (_: Exception) {}
+            var labels = labelsFor(cached)
+            val update = Theme.showMenu(this, newButton, labels, hPadDp = 10, alignEnd = true) { picked ->
+                val idx = labels.indexOf(picked)
+                if (idx >= 0) spawnEmptySession(keys[idx])
             }
+            Thread {
+                try {
+                    val accs = RelayClient(this).getUsage().optJSONArray("accounts") ?: return@Thread
+                    val pct = HashMap<String, String>(cached)
+                    for (i in 0 until accs.length()) {
+                        val a = accs.getJSONObject(i)
+                        fun p(k: String) = if (a.isNull(k)) "--" else Math.round(a.optDouble(k)).toInt().toString() + "%"
+                        pct[a.optString("account")] = "S ${p("session_pct")}  W ${p("weekly_pct")}"
+                    }
+                    prefs.edit().putString("pct", org.json.JSONObject(pct as Map<*, *>).toString()).apply()
+                    runOnUiThread { labels = labelsFor(pct); update(labels) }
+                } catch (_: Exception) {}
+            }.start()
         }
         searchRow.addView(newButton, newButtonParams)
 
@@ -875,6 +910,7 @@ class MainActivity : Activity() {
 
     private fun applyFilter() {
         adapter?.items = QueryDsl.apply(allConversations, searchQuery)
+        QueryDsl.fetchFts(this, searchQuery) { adapter?.items = QueryDsl.apply(allConversations, searchQuery) }
     }
 
     private fun updateSearchPopup(anchor: EditText) {

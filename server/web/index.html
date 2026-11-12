@@ -168,8 +168,27 @@ const rowOf=c=>({title:c.title||"",status:c.live?(c.live.status||"live"):"archiv
 let ftsPending=0;
 function fetchFts(term){if(term in FTSH)return;FTSH[term]=null;ftsPending++;
  api("/fts?q="+encodeURIComponent(term)).then(r=>{FTSH[term]=r.hits||{}}).catch(()=>{FTSH[term]={}}).finally(()=>{ftsPending--;renderList()})}
+/* base query (/base-query, /bq): as the FIRST token it is transparent - the rest of the line is the query and the stored base
+   query is NOT applied meanwhile (Enter replaces it). Enter: bare "/bq" shows the current base query in a read-only copyable dialog; "/bq <q>" saves q. */
+let QDEFAULT="";try{QDEFAULT=localStorage.getItem("query-default")||""}catch(e){}
+let QHIST=[];try{QHIST=JSON.parse(localStorage.getItem("query-default-history")||"[]")}catch(e){}
+const baseCandidates=()=>{const c=QDEFAULT.trim();return(c?[c]:[]).concat(QHIST.filter(x=>x!==c))};
+const DEFCMD=/^\s*\/(?:base-query|bq)(?:(\s+)([\s\S]*))?$/;
+const effectiveQuery=raw=>{const m=DEFCMD.exec(raw);if(m)return(m[2]||"").trim();return(QDEFAULT.trim()+" "+raw.trim()).trim()};
+function baseQueryView(){
+ const ov=document.createElement("div");ov.style.cssText="position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center";
+ ov.innerHTML='<div style="background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:14px;padding:18px;width:min(520px,92vw);box-shadow:0 10px 30px rgba(0,0,0,.35)"><div style="font-weight:600;margin-bottom:4px">Base query</div><div style="font-size:13px;color:var(--mut);margin-bottom:10px">'+(QDEFAULT?"Runs in front of every query. Change it with /bq &lt;query&gt; + Enter.":"(none set) Type /bq &lt;query&gt; and Enter to set one.")+'</div><input id="bqi" readonly style="width:100%;font:inherit;padding:8px 10px;border-radius:8px;border:1px solid var(--inpl);background:var(--inp);color:var(--txt)"><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px"><button id="bqk" style="font:inherit;padding:6px 14px;border-radius:8px;border:1px solid var(--line);background:transparent;color:var(--txt);cursor:pointer">Copy</button><button id="bqc" style="font:inherit;padding:6px 14px;border-radius:8px;border:0;background:var(--sendbg);color:var(--sendfg);cursor:pointer">Close</button></div></div>';
+ document.body.appendChild(ov);const i=ov.querySelector("#bqi");i.value=QDEFAULT;i.focus();i.select();
+ const close=()=>{ov.remove();$("search").focus()};
+ ov.querySelector("#bqc").onclick=close;ov.onclick=e=>{if(e.target===ov)close()};
+ ov.querySelector("#bqk").onclick=()=>{i.select();try{navigator.clipboard.writeText(QDEFAULT)}catch(e){document.execCommand("copy")}};
+ ov.onkeydown=e=>{if(e.key==="Enter"||e.key==="Escape"){e.preventDefault();e.stopPropagation();close()}else if(e.key==="Tab"){e.preventDefault()}}}
+function runDefaultCmd(raw){const m=DEFCMD.exec(raw);if(!m)return null;
+ if(m[1]===undefined){baseQueryView();return""}
+ const prev=QDEFAULT.trim();QDEFAULT=(m[2]||"").trim();if(QDEFAULT&&prev&&prev!==QDEFAULT&&QHIST.indexOf(prev)<0)QHIST=[prev].concat(QHIST);if(QDEFAULT){QHIST=[QDEFAULT].concat(QHIST.filter(x=>x!==QDEFAULT)).slice(0,100);try{localStorage.setItem("query-default-history",JSON.stringify(QHIST))}catch(e){}}try{if(QDEFAULT)localStorage.setItem("query-default",QDEFAULT);else localStorage.removeItem("query-default")}catch(e){}
+ return""}
 function visibleConvs(raw){
- const q=raw.trim();if(!q)return convs;
+ const q=effectiveQuery(raw);if(!q)return convs;
  if(!SCHEMA){const l=q.toLowerCase();return convs.filter(c=>(c.title||"").toLowerCase().includes(l))}   // engine failed to load: plain substring
  const scopes=ftsScopes(q),parsed=DSL.parseQuery(SCHEMA,rewriteFts(q));
  for(const t of parsed.terms)if(t.scoped&&t.value&&DSL.resolveNames(t.keys,TYPES).indexOf("fts")>=0)fetchFts(String(t.value).toLowerCase());
@@ -180,7 +199,7 @@ function visibleConvs(raw){
 function renderList(){
  const raw=$("search").value,vis=visibleConvs(raw);
  $("list").innerHTML="";
- if(!vis.length&&raw.trim())$("list").innerHTML='<div style="padding:18px;text-align:center;opacity:.6;font-size:13px">'+(ftsPending?"Searching…":"No matching chats")+"</div>";
+ if(!vis.length&&effectiveQuery(raw))$("list").innerHTML='<div style="padding:18px;text-align:center;opacity:.6;font-size:13px">'+(ftsPending?"Searching…":"No matching chats")+"</div>";
  vis.forEach(c=>{
   const d=document.createElement("div");d.className="row"+(cur&&cur.id==c.id?" on":"");
   const st=c.live?c.live.status:null;
@@ -356,9 +375,11 @@ $("inp").onkeydown=e=>{const k=e.key,i=$("inp");
 $("search").oninput=()=>{renderList();if(CPS.open)cpsNarrow()};
 /* ---- search-box completion: Tab or Ctrl+Space at a word starting with "/" (or "//") lists the commands and fields ---- */
 const CPS={open:false,c:[],sel:0,start:0};
-const CVERBS=[["/fv ","filter by field value: /fv title x"],["/ft ","filter types (columns)"],["/at ","add types"],["/rt ","remove types"],["/s/","sort: /s/age, /s/tokens/desc"],["/sort/","sort (long form)"],["/g/","group by field"],["/fts ","full-text search over the conversations: /fts words"]];
+const CVERBS=[["/fv ","filter by field value: /fv title x"],["/ft ","filter types (columns)"],["/at ","add types"],["/rt ","remove types"],["/s/","sort: /s/age, /s/tokens/desc"],["/sort/","sort (long form)"],["/g/","group by field"],["/fts ","full-text search over the conversations: /fts words"],["/bq ","base query: rest of the line runs as usual; Enter saves it as the query run in front of every query (/bq alone + Enter shows the current one)",true]];
 const CFIELDS=TYPES.filter(t=>t!=="fts");
 function cpsCands(q){
+ const bm0=/^(\s*\/(?:base-query|bq))(?:\s+([\s\S]*))?$/.exec(q),bm=bm0?[bm0[0],bm0[1]+" ",bm0[2]||""]:null;   // "/bq <frag>" + Tab: base-query history, current first
+ if(bm){const cur=QDEFAULT.trim(),h=baseCandidates().filter(x=>x.startsWith(bm[2].trim())).map(x=>[x,x===cur?"current":"previous"]);if(h.length)return[bm[1].length,h]}
  const m=/\s(?=\S*$)/.exec(q);let st=m?m.index+1:0;if(q[st]==="!")st++;
  const f=q.slice(st);if(f[0]!=="/")return[st,[]];
  const out=[];
@@ -369,7 +390,7 @@ function cpsCands(q){
   for(const n of CFIELDS)if(n.startsWith(sm[2]))out.push([verb+n+(sm[1][0]=="s"?"":" "),(sm[1][0]=="s"?"sort by ":"group by ")+n]);return[st,out]}
  const fm=/^\/fts\/([^/\s]*)$/.exec(f);
  if(fm){for(const n of ["live","archive"])if(n.startsWith(fm[1]))out.push(["/fts/"+n+" ","only "+n+" conversations"]);return[st,out]}
- if(!f.slice(1).includes("/")){for(const [v,l] of CVERBS)if(v.startsWith(f))out.push([v,l]);
+ if(!f.slice(1).includes("/")){for(const [v,l,first] of CVERBS)if(v.startsWith(f)&&(!first||st===0))out.push([v,l]);
   for(const n of CFIELDS)if(("/s/"+n).startsWith(f))out.push(["/s/"+n,"sort by "+n])}
  return[st,out]}
 function cpsDraw(){const el=$("cp");if(!CPS.open||!CPS.c.length){el.style.display="none";return}
@@ -391,6 +412,7 @@ $("search").addEventListener("keydown",e=>{
   if(k==="ArrowUp"||(e.ctrlKey&&k==="k")){e.preventDefault();CPS.sel=(CPS.sel+CPS.c.length-1)%CPS.c.length;return cpsDraw()}
   if(k==="Tab"||k==="Enter"){e.preventDefault();return cpsApply(CPS.sel)}
   if(k==="Escape"){e.preventDefault();e.stopPropagation();return cpsClose()}}
+ else if(k==="Enter"&&!e.isComposing){{const r=runDefaultCmd($("search").value);if(r!==null){e.preventDefault();$("search").value=r;renderList()}}}
  else if(k==="Tab"&&!e.shiftKey||(e.ctrlKey&&(k===" "||e.code==="Space"))){if(cpsStart())e.preventDefault()}});
 $("search").addEventListener("blur",()=>setTimeout(cpsClose,150));
 $("cp").addEventListener("mousedown",e=>{const d=e.target.closest("[data-i]");if(d){e.preventDefault();cpsApply(+d.dataset.i)}});

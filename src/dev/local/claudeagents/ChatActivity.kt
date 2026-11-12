@@ -588,6 +588,13 @@ class ChatActivity : Activity() {
         drawerSearchInput.hint = "Search… (/fv /s, see query-dsl.md)"
         drawerSearchInput.setSingleLine(true)
         drawerSearchInput.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
+        QueryDsl.loadDefault(this)
+        // Enter on "/base-query": bare = load the current base query into the box; with text = save it
+        drawerSearchInput.setOnEditorActionListener { _, _, _ ->
+            val r = QueryDsl.runDefaultCommand(this, drawerSearchInput.text.toString())
+            if (r != null) { drawerSearchInput.setText(r); drawerSearchInput.setSelection(r.length) }
+            r != null
+        }
         Theme.styleEditText(drawerSearchInput, this)
         val drawerSearchParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         drawerSearchParams.leftMargin = dp(12)
@@ -600,6 +607,7 @@ class ChatActivity : Activity() {
             override fun afterTextChanged(s: Editable?) {
                 drawerSearchQuery = s?.toString() ?: ""
                 drawerAdapter.items = QueryDsl.apply(drawerAllConversations, drawerSearchQuery)
+                QueryDsl.fetchFts(this@ChatActivity, drawerSearchQuery) { drawerAdapter.items = QueryDsl.apply(drawerAllConversations, drawerSearchQuery) }
                 updateDrawerSearchPopup(drawerSearchInput)
             }
         })

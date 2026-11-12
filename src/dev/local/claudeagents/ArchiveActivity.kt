@@ -165,6 +165,13 @@ class ArchiveActivity : Activity() {
         searchInput.hint = "Search… (/fv /s, see query-dsl.md)"
         searchInput.setSingleLine(true)
         searchInput.imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_SEARCH
+        QueryDsl.loadDefault(this)
+        // Enter on "/base-query": bare = load the current base query into the box; with text = save it
+        searchInput.setOnEditorActionListener { _, _, _ ->
+            val r = QueryDsl.runDefaultCommand(this, searchInput.text.toString())
+            if (r != null) { searchInput.setText(r); searchInput.setSelection(r.length) }
+            r != null
+        }
         Theme.styleEditText(searchInput, this)
         val searchParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
         searchRow.addView(searchInput, searchParams)
@@ -315,6 +322,7 @@ class ArchiveActivity : Activity() {
 
     private fun applyFilter() {
         adapter?.items = QueryDsl.apply(allConversations, searchQuery)
+        QueryDsl.fetchFts(this, searchQuery) { adapter?.items = QueryDsl.apply(allConversations, searchQuery) }
     }
 
     private fun updateSearchPopup(anchor: EditText) {
