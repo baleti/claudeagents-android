@@ -242,7 +242,7 @@ function dayLabel(ts){const d=new Date(ts);if(isNaN(d))return"";const t=new Date
  if(same(d,t))return"Today";if(same(d,y))return"Yesterday";
  return d.toLocaleDateString([],{weekday:"short",day:"numeric",month:"short",...(d.getFullYear()!==t.getFullYear()?{year:"numeric"}:{})})}
 function addMsgs(ms){
- const box=$("msgs"),atBot=box.scrollHeight-box.scrollTop-box.clientHeight<24,added=false;
+ let added=false;const box=$("msgs"),atBot=box.scrollHeight-box.scrollTop-box.clientHeight<24;
  if($("empty"))$("empty").remove();
  if(ms.length&&$("pend"))$("pend").remove();
  ms.forEach(m=>{if(m.line>last){added=true;const b=bubble(m);
