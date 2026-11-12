@@ -74,7 +74,8 @@ class MainActivity : Activity() {
     private var searchQuery: String = ""
     private var syncSpinner: View? = null
     private var syncLabel: TextView? = null
-    private var totalCountLabel: TextView? = null
+    private var totalPill: TextView? = null
+    private var hiddenPill: TextView? = null
     // Whether a round is actively running right now -- kept separate from
     // the "Synced N ago" text so the two compose instead of one replacing
     // the other: while syncing, the label still shows how stale the data
@@ -689,18 +690,32 @@ class MainActivity : Activity() {
         syncRowParams.bottomMargin = dp(2)
         root.addView(syncRow, syncRowParams)
 
-        // Asked for explicitly 2026-09-11: a small total-conversation-count
-        // line, same muted/11sp styling as the sync label above it. Counts
-        // allConversations (unfiltered) rather than whatever the search box
-        // currently shows -- "total" means total, not "how many matched".
-        val totalLabel = TextView(this)
-        totalLabel.textSize = 11f
-        totalLabel.setTextColor(Theme.muted)
-        val totalLabelParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
-        totalLabelParams.leftMargin = dp(12)
-        totalLabelParams.bottomMargin = dp(4)
-        root.addView(totalLabel, totalLabelParams)
-        totalCountLabel = totalLabel
+        // Tally pills (same as the Ctrl+Alt+c panel): "S total" first, then "N hidden" (what the effective query,
+        // base query + typed text, hides). Coloured by the most urgent status inside; tapping filters.
+        val pillRow = LinearLayout(this)
+        pillRow.orientation = LinearLayout.HORIZONTAL
+        val rowParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        rowParams.leftMargin = dp(12)
+        rowParams.bottomMargin = dp(4)
+        fun mkPill(): TextView {
+            val t = TextView(this)
+            t.textSize = 11f
+            t.setPadding(dp(10), dp(3), dp(10), dp(3))
+            val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            lp.rightMargin = dp(6)
+            pillRow.addView(t, lp)
+            return t
+        }
+        totalPill = mkPill()
+        hiddenPill = mkPill()
+        totalPill?.setOnClickListener { setSearchText("") }
+        hiddenPill?.setOnClickListener {
+            if (hiddenFilterActive()) { setSearchText(""); return@setOnClickListener }
+            val eff = QueryDsl.effective(searchQuery).replace("\n", " ").trim()
+            val inv = if (eff.isEmpty()) "" else QueryDsl.invertBase(eff)
+            if (inv.isNotEmpty()) setSearchText("!/bq $inv ")
+        }
+        root.addView(pillRow, rowParams)
 
         val header = tableHeaderRow()
         header.setOnLongClickListener { confirmRepair(); true }
@@ -888,7 +903,6 @@ class MainActivity : Activity() {
     private fun refreshList() {
         adapter ?: return
         allConversations = db.listConversations().filter { it.isLive }
-        totalCountLabel?.text = "${allConversations.size} conversation${if (allConversations.size == 1) "" else "s"}"
         applyFilter()
         val ok = getSharedPreferences("claudeagents_prefs", Context.MODE_PRIVATE)
             .getBoolean("last_sync_ok", true)
@@ -911,7 +925,43 @@ class MainActivity : Activity() {
 
     private fun applyFilter() {
         adapter?.items = QueryDsl.apply(allConversations, searchQuery)
-        QueryDsl.fetchFts(this, searchQuery) { adapter?.items = QueryDsl.apply(allConversations, searchQuery) }
+        updatePills()
+        QueryDsl.fetchFts(this, searchQuery) {
+            adapter?.items = QueryDsl.apply(allConversations, searchQuery)
+            updatePills()
+        }
+    }
+
+    private fun setSearchText(t: String) {
+        val input = searchInput ?: return
+        input.setText(t)
+        input.setSelection(t.length)
+        input.requestFocus()
+    }
+
+    private fun hiddenFilterActive(): Boolean = Regex("^\\s*!/(?:base-query|bq)(?=\\s|$)").containsMatchIn(searchQuery)
+
+    // Most urgent status wins: busy > waiting > idle > frozen; nothing live-known = muted.
+    private fun worstStatusColor(rows: List<ConversationRow>): Int {
+        val rank = mapOf("busy" to 4, "waiting" to 3, "idle" to 2, "frozen" to 1)
+        val best = rows.maxByOrNull { rank[it.liveStatus] ?: 0 }?.liveStatus
+        return if (best == null) Theme.muted else ConversationColumns.statusStyle(best).color
+    }
+
+    private fun stylePill(t: TextView?, text: String, color: Int, active: Boolean) {
+        t ?: return
+        t.text = text
+        t.setTextColor(color)
+        t.background = Theme.roundedDrawable(Theme.surface, this, radiusDp = 14,
+            strokeColor = if (active) Theme.primary else Theme.outlineVariant)
+    }
+
+    private fun updatePills() {
+        val shown = adapter?.items ?: allConversations
+        val keep = shown.map { it.id }.toSet()
+        val hidden = allConversations.filter { it.id !in keep }
+        stylePill(totalPill, "\u03A3 ${allConversations.size}", worstStatusColor(allConversations), searchQuery.isBlank())
+        stylePill(hiddenPill, "${hidden.size} hidden", worstStatusColor(hidden), hiddenFilterActive())
     }
 
     private fun updateSearchPopup(anchor: EditText) {
