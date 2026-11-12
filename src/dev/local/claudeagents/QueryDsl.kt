@@ -124,7 +124,7 @@ object QueryDsl {
     @Volatile var defaultQuery: String = ""
     /** Every non-empty base query ever set, most recent first. */
     @Volatile var baseHistory: List<String> = emptyList()
-    private val BQ_REST = Regex("^(\\s*/(?:base-query|bq)\\s+)(.*)$", RegexOption.DOT_MATCHES_ALL)
+    private val BQ_REST = Regex("^(\\s*!?/(?:base-query|bq)\\s+)(.*)$", RegexOption.DOT_MATCHES_ALL)
 
     /** Current base query first (if set), then the previous ones. */
     fun baseCandidates(): List<String> {

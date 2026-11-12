@@ -383,7 +383,7 @@ const CPS={open:false,c:[],sel:0,start:0};
 const CVERBS=[["/fv ","filter by field value: /fv title x"],["/ft ","filter types (columns)"],["/at ","add types"],["/rt ","remove types"],["/s/","sort: /s/age, /s/tokens/desc"],["/sort/","sort (long form)"],["/g/","group by field"],["/fts ","full-text search over the conversations: /fts words"],["/bq ","base query: rest of the line runs as usual; Enter saves it as the query run in front of every query (/bq alone + Enter shows the current one)",true]];
 const CFIELDS=TYPES.filter(t=>t!=="fts");
 function cpsCands(q){
- const bm0=/^(\s*\/(?:base-query|bq))(?:\s+([\s\S]*))?$/.exec(q),bm=bm0?[bm0[0],bm0[1]+" ",bm0[2]||""]:null;   // "/bq <frag>" + Tab: base-query history, current first
+ const bm0=/^(\s*!?\/(?:base-query|bq))(?:\s+([\s\S]*))?$/.exec(q),bm=bm0?[bm0[0],bm0[1]+" ",bm0[2]||""]:null;   // "/bq <frag>" + Tab: base-query history, current first
  if(bm){const cur=QDEFAULT.trim(),h=baseCandidates().filter(x=>x.startsWith(bm[2].trim())&&x!==bm[2].trim()).map(x=>[x,x===cur?"current":"previous"]);if(h.length)return[bm[1].length,h]}
  const m=/\s(?=\S*$)/.exec(q);let st=m?m.index+1:0;if(q[st]==="!")st++;
  const f=q.slice(st);if(f[0]!=="/")return[st,[]];
