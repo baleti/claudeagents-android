@@ -124,7 +124,50 @@ object QueryDsl {
     @Volatile var defaultQuery: String = ""
     /** Every non-empty base query ever set, most recent first. */
     @Volatile var baseHistory: List<String> = emptyList()
-    private val BQ_REST = Regex("^(\\s*!?/(?:base-query|bq)\\s+)(.*)$", RegexOption.DOT_MATCHES_ALL)
+    private val BQ_REST = Regex("^(\\s*/(?:base-query|bq)\\s+)(.*)$", RegexOption.DOT_MATCHES_ALL)
+
+    private val NEG_BQ = Regex("^(\\s*)!/(?:base-query|bq)(?=\\s|$)(.*)$", RegexOption.DOT_MATCHES_ALL)
+    private val VERB_TOKEN = Regex("^/(fv|filter-value|ft|filter-type|at|add-type|rt|remove-type|s|sort|g|group|fts|full-text-search|bq|base-query)(/\\S*)?$")
+    private fun isVerbTok(t: String): Boolean { val u = t.removePrefix("!"); return Regex("^//[^\\s/]*$").matches(u) || VERB_TOKEN.matches(u) }
+
+    /**
+     * The opposite of a base query, written out (`!/bq` + completion). Terms are ANDed, so the complement is "any
+     * term fails": exact for one term (flip its `!`) and for several negated terms on the same keys (they become
+     * one positive `//keys a||b` term); otherwise every term is flipped (an approximation, they stay ANDed).
+     */
+    fun invertBase(q: String): String {
+        val toks = Regex("!?\"[^\"]*\"?|\\S+").findAll(q).map { it.value }.toList()
+        class It(val other: String?, val neg: Boolean, val keys: String?, val value: String)
+        val items = mutableListOf<It>()
+        var i = 0
+        while (i < toks.size) {
+            val t = toks[i]; val neg = t.startsWith("!"); val u = if (neg) t.substring(1) else t
+            val k = Regex("^//([a-z,-]*)$").matchEntire(u)?.groupValues?.get(1)
+                ?: Regex("^/(?:fv|filter-value)/([a-z,-]*)$").matchEntire(u)?.groupValues?.get(1)
+            if (k != null && k.isNotEmpty()) {
+                val nx = toks.getOrNull(i + 1)
+                if (nx != null && !isVerbTok(nx)) { items.add(It(null, neg, k, nx)); i += 2; continue }
+                items.add(It(t, false, null, "")); i++; continue
+            }
+            if (isVerbTok(t)) {
+                var tx = t; i++
+                if (Regex("^/(fts|full-text-search)").containsMatchIn(u)) while (i < toks.size && !isVerbTok(toks[i])) tx += " " + toks[i++]
+                items.add(It(tx, false, null, "")); continue
+            }
+            items.add(It(null, neg, null, u)); i++
+        }
+        val fs = items.filter { it.other == null }
+        if (fs.isEmpty()) return q.trim()
+        val merge = fs.size > 1 && fs.all { it.neg && it.keys == fs[0].keys && !it.value.contains('"') }
+        val out = mutableListOf<String>()
+        var done = false
+        for (x in items) {
+            if (x.other != null) { out.add(x.other); continue }
+            if (merge) { if (!done) { done = true; out.add((if (fs[0].keys != null) "//" + fs[0].keys + " " else "") + fs.joinToString("||") { it.value }) }; continue }
+            out.add((if (x.neg) "" else "!") + (if (x.keys != null) "//" + x.keys + " " else "") + x.value)
+        }
+        return out.joinToString(" ")
+    }
 
     /** Current base query first (if set), then the previous ones. */
     fun baseCandidates(): List<String> {
@@ -532,6 +575,11 @@ object QueryDsl {
     // after "/fv ") to the end -- a single contiguous replacement, never a
     // cross-token rewrite.
     fun suggestions(all: List<ConversationRow>, query: String): List<Suggestion> {
+        // "!/bq [rest]": one suggestion that expands "!/bq" into the opposite of the base query
+        NEG_BQ.matchEntire(query)?.let { m ->
+            val inv = invertBase(defaultQuery.trim())
+            if (inv.isNotEmpty()) return listOf(Suggestion("!/bq", "!/base-query", "opposite of the base query: $inv", m.groupValues[1] + inv + " " + m.groupValues[2].trim()))
+        }
         // "/bq <frag>": the base-query history (current first), prefix-filtered by <frag>; falls through when nothing matches
         BQ_REST.matchEntire(query)?.let { m ->
             val frag = m.groupValues[2].trim()
@@ -592,6 +640,7 @@ object QueryDsl {
 
     // Where a completion's insertText should splice in -- see suggestions().
     fun replaceFrom(query: String): Int {
+        if (NEG_BQ.matches(query) && defaultQuery.isNotBlank()) return 0   // the "!/bq" suggestion replaces the whole text
         BQ_REST.matchEntire(query)?.let { m ->
             if (baseCandidates().any { it.startsWith(m.groupValues[2].trim()) && it != m.groupValues[2].trim() }) return m.groupValues[1].length
         }
