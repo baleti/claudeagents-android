@@ -126,7 +126,7 @@ object QueryDsl {
     @Volatile var baseHistory: List<String> = emptyList()
     private val BQ_REST = Regex("^(\\s*/(?:base-query|bq)\\s+)(.*)$", RegexOption.DOT_MATCHES_ALL)
 
-    private val NEG_BQ = Regex("^(\\s*)!/(?:base-query|bq)(?=\\s|$)(.*)$", RegexOption.DOT_MATCHES_ALL)
+    private val NEG_BQ = Regex("^(\\s*!/(?:base-query|bq))\\s*$")
     private val VERB_TOKEN = Regex("^/(fv|filter-value|ft|filter-type|at|add-type|rt|remove-type|s|sort|g|group|fts|full-text-search|bq|base-query)(/\\S*)?$")
     private fun isVerbTok(t: String): Boolean { val u = t.removePrefix("!"); return Regex("^//[^\\s/]*$").matches(u) || VERB_TOKEN.matches(u) }
 
@@ -383,13 +383,7 @@ object QueryDsl {
     }
 
     /** Terms of every `/fts` in [query] that still need fetching from the relay (not in [ftsHits] yet). */
-    fun pendingFtsTerms(typed: String): List<String> {
-        if (isNegatedBase(typed) && defaultQuery.isNotBlank()) return (pendingFtsTermsOf(effective(typed)) + pendingFtsTermsOf(defaultQuery)).distinct()
-        return pendingFtsTermsOf(effective(typed))
-    }
-
-    /** `!/bq ...` as the first token: show the rows the base query filters OUT (the rest still applies on top). */
-    fun isNegatedBase(typed: String): Boolean = DEFAULT_CMD.matchEntire(typed)?.groupValues?.get(1) == "!"
+    fun pendingFtsTerms(typed: String): List<String> = pendingFtsTermsOf(effective(typed))
 
     private fun pendingFtsTermsOf(query: String): List<String> {
         val tokens = tokenize(query)
@@ -425,11 +419,6 @@ object QueryDsl {
     }
 
     fun apply(all: List<ConversationRow>, typed: String): List<ConversationRow> {
-        if (isNegatedBase(typed)) {
-            val kept = applyRaw(all, effective(typed)).toSet()
-            val passing = applyRaw(all, defaultQuery).toSet()   // an empty base query passes everything -> nothing left
-            return all.filter { it in kept && it !in passing }.let { rows -> applyRaw(rows, effective(typed)) }
-        }
         return applyRaw(all, effective(typed))
     }
 
@@ -575,10 +564,10 @@ object QueryDsl {
     // after "/fv ") to the end -- a single contiguous replacement, never a
     // cross-token rewrite.
     fun suggestions(all: List<ConversationRow>, query: String): List<Suggestion> {
-        // "!/bq [rest]": one suggestion that expands "!/bq" into the opposite of the base query
+        // "!/bq" alone: one suggestion that writes the opposite of the base query after it ("!/bq" keeps the base query off)
         NEG_BQ.matchEntire(query)?.let { m ->
             val inv = invertBase(defaultQuery.trim())
-            if (inv.isNotEmpty()) return listOf(Suggestion("!/bq", "!/base-query", "opposite of the base query: $inv", m.groupValues[1] + inv + " " + m.groupValues[2].trim()))
+            if (inv.isNotEmpty()) return listOf(Suggestion("!/bq", "!/base-query", "opposite of the base query: $inv", m.groupValues[1] + " " + inv))
         }
         // "/bq <frag>": the base-query history (current first), prefix-filtered by <frag>; falls through when nothing matches
         BQ_REST.matchEntire(query)?.let { m ->
