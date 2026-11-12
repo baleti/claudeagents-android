@@ -242,10 +242,10 @@ function dayLabel(ts){const d=new Date(ts);if(isNaN(d))return"";const t=new Date
  if(same(d,t))return"Today";if(same(d,y))return"Yesterday";
  return d.toLocaleDateString([],{weekday:"short",day:"numeric",month:"short",...(d.getFullYear()!==t.getFullYear()?{year:"numeric"}:{})})}
 function addMsgs(ms){
- const box=$("msgs"),atBot=box.scrollHeight-box.scrollTop-box.clientHeight<120;
+ const box=$("msgs"),atBot=box.scrollHeight-box.scrollTop-box.clientHeight<24,added=false;
  if($("empty"))$("empty").remove();
  if(ms.length&&$("pend"))$("pend").remove();
- ms.forEach(m=>{if(m.line>last){const b=bubble(m);
+ ms.forEach(m=>{if(m.line>last){added=true;const b=bubble(m);
   if(m.role=="user"){const n=String(m.text||"").trim();const q=[...box.querySelectorAll(".sending")].find(x=>x.dataset.t==n);if(q)q.remove()}   // my own follow-up has landed in the transcript
   const sp=box.querySelector(".sending");
   // a date line whenever the day changes (and before the first message); hovering a message shows its exact date and time
@@ -256,7 +256,7 @@ function addMsgs(ms){
   if(sp)box.insertBefore(b,sp);else box.appendChild(b);last=m.line;
   if(!b.classList.contains("me")){let u=b.previousElementSibling;while(u&&!u.classList.contains("me"))u=u.previousElementSibling;   // new reply under a folded message stays folded
    if(u&&u.classList.contains("folded")){b.hidden=true;if(dv)dv.hidden=true;u.dataset.hid=(+u.dataset.hid||0)+1}}}});
- if(atBot)box.scrollTop=box.scrollHeight}
+ if(atBot&&added)box.scrollTop=box.scrollHeight}
 async function open(c){
  pics.forEach(p=>URL.revokeObjectURL(p.url));pics=[];renderPics(); lastDay="";cur=c;try{history.replaceState(null,"","#/chat/"+c.id)}catch(e){}$("bExit").style.display="";last=0;polling++;document.body.classList.add("chat");
  $("ct").firstChild.textContent=c.title||"(untitled)";$("cs").textContent=c.account_label||"";
