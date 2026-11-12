@@ -30,6 +30,7 @@ button:hover{background:var(--sel)}
 #mm div{padding:7px 12px;border-radius:8px;cursor:pointer;white-space:nowrap}#mm div:hover{background:var(--sel)}
 #cp div,#hp div{display:flex;gap:10px;padding:5px 9px;border-radius:8px;cursor:pointer;white-space:nowrap}#cp div.sel,#hp div.sel{background:var(--sel)}#hp div{max-width:min(720px,92vw)}#hp div span{overflow:hidden;text-overflow:ellipsis}#hp .hd{color:var(--mut);font-size:11px;cursor:default}
 #xp{position:fixed;z-index:31;display:none;background:var(--bg);border:1px solid var(--line);border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.35);padding:10px;width:230px;font-size:13px}#xp .q{margin-bottom:8px;line-height:1.35}#xp .q small{display:block;color:var(--mut);font-size:12px;margin-top:2px}#xp .bt{display:flex;gap:8px}#xp button{flex:1;padding:8px;border-radius:10px;border:1px solid var(--line)}#xp #xpGo{background:#e5484d;color:#fff;border-color:#e5484d}
+#cp{max-width:min(720px,92vw)}#cp div{flex-wrap:wrap;white-space:normal;overflow-wrap:anywhere}
 #cp b{font-family:"Roboto Mono",ui-monospace,Consolas,monospace;font-weight:600}#cp span{color:var(--mut);overflow:hidden;text-overflow:ellipsis}
 #list{flex:1;overflow-y:auto;padding:0 8px 8px}
 .row{display:flex;gap:10px;padding:8px 10px;cursor:pointer;border-radius:10px;align-items:center;margin-bottom:1px}
@@ -173,8 +174,8 @@ function fetchFts(term){if(term in FTSH)return;FTSH[term]=null;ftsPending++;
 let QDEFAULT="";try{QDEFAULT=localStorage.getItem("query-default")||""}catch(e){}
 let QHIST=[];try{QHIST=JSON.parse(localStorage.getItem("query-default-history")||"[]")}catch(e){}
 const baseCandidates=()=>{const c=QDEFAULT.trim();return(c?[c]:[]).concat(QHIST.filter(x=>x!==c))};
-const DEFCMD=/^\s*\/(?:base-query|bq)(?:(\s+)([\s\S]*))?$/;
-const effectiveQuery=raw=>{const m=DEFCMD.exec(raw);if(m)return(m[2]||"").trim();return(QDEFAULT.trim()+" "+raw.trim()).trim()};
+const DEFCMD=/^\s*(!?)\/(?:base-query|bq)(?:(\s+)([\s\S]*))?$/;   // 1 "!" = negated (the rows the base query filters OUT), 2 whitespace, 3 rest
+const effectiveQuery=raw=>{const m=DEFCMD.exec(raw);if(m)return(m[3]||"").trim();return(QDEFAULT.trim()+" "+raw.trim()).trim()};
 function baseQueryView(){
  const ov=document.createElement("div");ov.style.cssText="position:fixed;inset:0;z-index:50;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center";
  ov.innerHTML='<div style="background:var(--bg);color:var(--txt);border:1px solid var(--line);border-radius:14px;padding:18px;width:min(520px,92vw);box-shadow:0 10px 30px rgba(0,0,0,.35)"><div style="font-weight:600;margin-bottom:4px">Base query</div><div style="font-size:13px;color:var(--mut);margin-bottom:10px">'+(QDEFAULT?"Runs in front of every query. Change it with /bq &lt;query&gt; + Enter.":"(none set) Type /bq &lt;query&gt; and Enter to set one.")+'</div><input id="bqi" readonly style="width:100%;font:inherit;padding:8px 10px;border-radius:8px;border:1px solid var(--inpl);background:var(--inp);color:var(--txt)"><div style="display:flex;gap:8px;justify-content:flex-end;margin-top:12px"><button id="bqk" style="font:inherit;padding:6px 14px;border-radius:8px;border:1px solid var(--line);background:transparent;color:var(--txt);cursor:pointer">Copy</button><button id="bqc" style="font:inherit;padding:6px 14px;border-radius:8px;border:0;background:var(--sendbg);color:var(--sendfg);cursor:pointer">Close</button></div></div>';
@@ -183,12 +184,16 @@ function baseQueryView(){
  ov.querySelector("#bqc").onclick=close;ov.onclick=e=>{if(e.target===ov)close()};
  ov.querySelector("#bqk").onclick=()=>{i.select();try{navigator.clipboard.writeText(QDEFAULT)}catch(e){document.execCommand("copy")}};
  ov.onkeydown=e=>{if(e.key==="Enter"||e.key==="Escape"){e.preventDefault();e.stopPropagation();close()}else if(e.key==="Tab"){e.preventDefault()}}}
-function runDefaultCmd(raw){const m=DEFCMD.exec(raw);if(!m)return null;
- if(m[1]===undefined){baseQueryView();return""}
- const prev=QDEFAULT.trim();QDEFAULT=(m[2]||"").trim();if(QDEFAULT&&prev&&prev!==QDEFAULT&&QHIST.indexOf(prev)<0)QHIST=[prev].concat(QHIST);if(QDEFAULT){QHIST=[QDEFAULT].concat(QHIST.filter(x=>x!==QDEFAULT)).slice(0,100);try{localStorage.setItem("query-default-history",JSON.stringify(QHIST))}catch(e){}}try{if(QDEFAULT)localStorage.setItem("query-default",QDEFAULT);else localStorage.removeItem("query-default")}catch(e){}
+function runDefaultCmd(raw){const m=DEFCMD.exec(raw);if(!m||m[1]==="!")return null;   // "!/bq" is only a view
+ if(m[2]===undefined){baseQueryView();return""}
+ const prev=QDEFAULT.trim();QDEFAULT=(m[3]||"").trim();if(QDEFAULT&&prev&&prev!==QDEFAULT&&QHIST.indexOf(prev)<0)QHIST=[prev].concat(QHIST);if(QDEFAULT){QHIST=[QDEFAULT].concat(QHIST.filter(x=>x!==QDEFAULT)).slice(0,100);try{localStorage.setItem("query-default-history",JSON.stringify(QHIST))}catch(e){}}try{if(QDEFAULT)localStorage.setItem("query-default",QDEFAULT);else localStorage.removeItem("query-default")}catch(e){}
  return""}
 function visibleConvs(raw){
- const q=effectiveQuery(raw);if(!q)return convs;
+ const m=DEFCMD.exec(raw);
+ if(m&&m[1]==="!"){const rest=selectFor(effectiveQuery(raw)),pass=new Set(selectFor(QDEFAULT.trim()).map(c=>c.id));return rest.filter(c=>!pass.has(c.id))}   // !/bq: what the base query filters out
+ return selectFor(effectiveQuery(raw))}
+function selectFor(q){
+ if(!q)return convs;
  if(!SCHEMA){const l=q.toLowerCase();return convs.filter(c=>(c.title||"").toLowerCase().includes(l))}   // engine failed to load: plain substring
  const scopes=ftsScopes(q),parsed=DSL.parseQuery(SCHEMA,rewriteFts(q));
  for(const t of parsed.terms)if(t.scoped&&t.value&&DSL.resolveNames(t.keys,TYPES).indexOf("fts")>=0)fetchFts(String(t.value).toLowerCase());

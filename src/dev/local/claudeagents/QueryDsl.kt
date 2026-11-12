@@ -118,7 +118,7 @@ object QueryDsl {
 
     // ---- base query (/base-query, see query-dsl.md) ----
     private const val DEFAULT_PREFS = "claudeagents_query_default"
-    private val DEFAULT_CMD = Regex("^\\s*/(?:base-query|bq)(?:(\\s+)(.*))?$", RegexOption.DOT_MATCHES_ALL)
+    private val DEFAULT_CMD = Regex("^\\s*(!?)/(?:base-query|bq)(?:(\\s+)(.*))?$", RegexOption.DOT_MATCHES_ALL)   // groups: 1 "!" (negated), 2 whitespace, 3 rest
 
     /** The stored base query: written in front of every typed query, as if the user had typed it. */
     @Volatile var defaultQuery: String = ""
@@ -143,7 +143,7 @@ object QueryDsl {
      * stored [defaultQuery] is NOT applied (Enter replaces it). Otherwise [defaultQuery] + typed text.
      */
     fun effective(typed: String): String {
-        DEFAULT_CMD.matchEntire(typed)?.let { return it.groupValues[2] }
+        DEFAULT_CMD.matchEntire(typed)?.let { return it.groupValues[3] }
         return if (defaultQuery.isBlank()) typed else if (typed.isBlank()) defaultQuery else defaultQuery.trim() + " " + typed
     }
 
@@ -155,7 +155,8 @@ object QueryDsl {
      */
     fun runDefaultCommand(activity: android.app.Activity, typed: String): String? {
         val m = DEFAULT_CMD.matchEntire(typed) ?: return null
-        if (m.groupValues[1].isEmpty()) {
+        if (m.groupValues[1] == "!") return null   // "!/bq" is only a view
+        if (m.groupValues[2].isEmpty()) {
             val tv = android.widget.TextView(activity)
             tv.text = if (defaultQuery.isEmpty()) "(none set)\n\nType /bq <query> and Enter to set one." else defaultQuery
             tv.setTextIsSelectable(true)
@@ -173,7 +174,7 @@ object QueryDsl {
             return ""
         }
         val prev = defaultQuery.trim()
-        defaultQuery = m.groupValues[2].trim()
+        defaultQuery = m.groupValues[3].trim()
         if (defaultQuery.isNotEmpty() && prev.isNotEmpty() && prev != defaultQuery && prev !in baseHistory) baseHistory = listOf(prev) + baseHistory
         if (defaultQuery.isNotEmpty()) baseHistory = (listOf(defaultQuery) + baseHistory.filter { it != defaultQuery }).take(100)
         activity.getSharedPreferences(DEFAULT_PREFS, Context.MODE_PRIVATE).edit()
@@ -340,7 +341,15 @@ object QueryDsl {
 
     /** Terms of every `/fts` in [query] that still need fetching from the relay (not in [ftsHits] yet). */
     fun pendingFtsTerms(typed: String): List<String> {
-        val tokens = tokenize(effective(typed))
+        if (isNegatedBase(typed) && defaultQuery.isNotBlank()) return (pendingFtsTermsOf(effective(typed)) + pendingFtsTermsOf(defaultQuery)).distinct()
+        return pendingFtsTermsOf(effective(typed))
+    }
+
+    /** `!/bq ...` as the first token: show the rows the base query filters OUT (the rest still applies on top). */
+    fun isNegatedBase(typed: String): Boolean = DEFAULT_CMD.matchEntire(typed)?.groupValues?.get(1) == "!"
+
+    private fun pendingFtsTermsOf(query: String): List<String> {
+        val tokens = tokenize(query)
         val out = mutableListOf<String>()
         var idx = 0
         while (idx < tokens.size) {
@@ -373,7 +382,15 @@ object QueryDsl {
     }
 
     fun apply(all: List<ConversationRow>, typed: String): List<ConversationRow> {
-        val query = effective(typed)
+        if (isNegatedBase(typed)) {
+            val kept = applyRaw(all, effective(typed)).toSet()
+            val passing = applyRaw(all, defaultQuery).toSet()   // an empty base query passes everything -> nothing left
+            return all.filter { it in kept && it !in passing }.let { rows -> applyRaw(rows, effective(typed)) }
+        }
+        return applyRaw(all, effective(typed))
+    }
+
+    private fun applyRaw(all: List<ConversationRow>, query: String): List<ConversationRow> {
         if (query.isBlank()) return all
         val tokens = tokenize(query)
         if (tokens.isEmpty()) return all
