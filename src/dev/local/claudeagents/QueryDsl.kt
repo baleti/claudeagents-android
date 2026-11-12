@@ -536,7 +536,7 @@ object QueryDsl {
         BQ_REST.matchEntire(query)?.let { m ->
             val frag = m.groupValues[2].trim()
             val cur = defaultQuery.trim()
-            val hits = baseCandidates().filter { it.startsWith(frag) }
+            val hits = baseCandidates().filter { it.startsWith(frag) && it != frag }
                 .map { Suggestion(it, null, if (it == cur) "current" else "previous", it) }
             if (hits.isNotEmpty()) return hits
         }
@@ -593,7 +593,7 @@ object QueryDsl {
     // Where a completion's insertText should splice in -- see suggestions().
     fun replaceFrom(query: String): Int {
         BQ_REST.matchEntire(query)?.let { m ->
-            if (baseCandidates().any { it.startsWith(m.groupValues[2].trim()) }) return m.groupValues[1].length
+            if (baseCandidates().any { it.startsWith(m.groupValues[2].trim()) && it != m.groupValues[2].trim() }) return m.groupValues[1].length
         }
         val trailingSpace = query.isNotEmpty() && query.last().isWhitespace()
         if (trailingSpace) return query.length
