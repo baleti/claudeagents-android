@@ -295,7 +295,7 @@ function addMsgs(ms){
  if($("empty"))$("empty").remove();
  if(ms.length&&$("pend"))$("pend").remove();
  ms.forEach(m=>{if(m.line>last){added=true;const b=bubble(m);
-  if(m.role=="user"){const n=String(m.text||"").trim();const q=[...box.querySelectorAll(".sending")].find(x=>x.dataset.t==n);if(q)q.remove()}   // my own follow-up has landed in the transcript
+  if(m.role=="user"){const nz=v=>String(v||"").replace(/\s+/g,"").toLowerCase();const n=nz(m.text);const q=[...box.querySelectorAll(".sending")].find(x=>{const t=nz(x.dataset.t);return t==n||(t.length>=20&&n.length>=20&&(n.startsWith(t.slice(0,40))||t.startsWith(n.slice(0,40))))});if(q)q.remove()}   // my own follow-up has landed in the transcript
   const sp=box.querySelector(".sending");
   // a date line whenever the day changes (and before the first message); hovering a message shows its exact date and time
   let dv=null;const dk=m.ts?new Date(m.ts).toDateString():"";
