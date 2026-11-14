@@ -113,7 +113,8 @@ object QueryDsl {
         VerbInfo("fv", "filter-value", "keep rows whose value matches (substring)"),
         VerbInfo("s", "sort", "order rows by the keys, /s/key,key/desc"),
         VerbInfo("fts", "full-text-search", "full text of every conversation, live and archived: /fts words up to the next /verb"),
-        VerbInfo("bq", "base-query", "base query: rest of the line runs as usual; Enter saves it as the query run in front of every query (/bq alone + Enter shows the current one)")
+        VerbInfo("bq", "base-query", "base query: rest of the line runs as usual; Enter saves it as the query run in front of every query (/bq alone + Enter shows the current one)"),
+        VerbInfo("dbq", "disable-base-query", "disable base query: Enter clears the stored base query, nothing is run in front of queries any more")
     )
 
     // ---- base query (/base-query, see query-dsl.md) ----
@@ -124,6 +125,7 @@ object QueryDsl {
     @Volatile var defaultQuery: String = ""
     /** Every non-empty base query ever set, most recent first. */
     @Volatile var baseHistory: List<String> = emptyList()
+    private val DISABLE_CMD = Regex("^\\s*/(?:dbq|disable-base-query)\\s*$")
     private val BQ_REST = Regex("^(\\s*/(?:base-query|bq)\\s+)(.*)$", RegexOption.DOT_MATCHES_ALL)
 
     private val NEG_BQ = Regex("^(\\s*!/(?:base-query|bq))\\s*$")
@@ -215,9 +217,10 @@ object QueryDsl {
      * Returns null if [typed] is not the command (nothing done).
      */
     fun runDefaultCommand(activity: android.app.Activity, typed: String): String? {
-        val m = DEFAULT_CMD.matchEntire(typed) ?: return null
-        if (m.groupValues[1] == "!") return null   // "!/bq" is only a view
-        if (m.groupValues[2].isEmpty()) {
+        val dis = DISABLE_CMD.matches(typed)   // /dbq: same as "/bq " with nothing after it
+        val m = if (dis) null else (DEFAULT_CMD.matchEntire(typed) ?: return null)
+        if (m != null && m.groupValues[1] == "!") return null   // "!/bq" is only a view
+        if (m != null && m.groupValues[2].isEmpty()) {
             val tv = android.widget.TextView(activity)
             tv.text = if (defaultQuery.isEmpty()) "(none set)\n\nType /bq <query> and Enter to set one." else defaultQuery
             tv.setTextIsSelectable(true)
@@ -235,7 +238,7 @@ object QueryDsl {
             return ""
         }
         val prev = defaultQuery.trim()
-        defaultQuery = m.groupValues[3].trim()
+        defaultQuery = if (m == null) "" else m.groupValues[3].trim()
         if (defaultQuery.isNotEmpty() && prev.isNotEmpty() && prev != defaultQuery && prev !in baseHistory) baseHistory = listOf(prev) + baseHistory
         if (defaultQuery.isNotEmpty()) baseHistory = (listOf(defaultQuery) + baseHistory.filter { it != defaultQuery }).take(100)
         activity.getSharedPreferences(DEFAULT_PREFS, Context.MODE_PRIVATE).edit()
@@ -609,8 +612,8 @@ object QueryDsl {
         if (current != null && !current.isQuoted && current.raw.startsWith("/") && !current.raw.substring(1).contains("/")) {
             val frag = current.raw.substring(1).lowercase()
             // /bq is a command, not a pipeline stage: only the very first token of the query
-            return ACTIVE_VERBS.filter { it.short.contains(frag) && (tokens.size == 1 || it.short != "bq") }
-                .map { Suggestion("/${it.short}", "/${it.long}", it.description, if (it.short == "bq") "/${it.short} " else "/${it.short}/") }
+            return ACTIVE_VERBS.filter { it.short.contains(frag) && (tokens.size == 1 || (it.short != "bq" && it.short != "dbq")) }
+                .map { Suggestion("/${it.short}", "/${it.long}", it.description, if (it.short == "bq" || it.short == "dbq") "/${it.short} " else "/${it.short}/") }
         }
 
         // Stage 2: keys -- being typed after "/fv/", "//" or "/s/" (the fragment after the last comma),

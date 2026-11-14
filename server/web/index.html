@@ -211,9 +211,10 @@ function bqCache(){try{if(QDEFAULT)localStorage.setItem("query-default",QDEFAULT
 function bqSync(){return api("/base-query").then(r=>{QDEFAULT=(r.query||"").trim();QHIST=Array.isArray(r.history)?r.history:[];bqCache();if(typeof renderList==="function")renderList()}).catch(()=>{})}
 function bqPush(){api("/base-query",{method:"POST",body:JSON.stringify({query:QDEFAULT})}).then(r=>{QHIST=Array.isArray(r.history)?r.history:QHIST;bqCache()}).catch(()=>{})}
 setTimeout(bqSync,0);addEventListener("focus",bqSync);
-function runDefaultCmd(raw){const m=DEFCMD.exec(raw);if(!m||m[1]==="!")return null;   // "!/bq" is only a view
- if(m[2]===undefined){baseQueryView();return""}
- const prev=QDEFAULT.trim();QDEFAULT=(m[3]||"").trim();if(QDEFAULT&&prev&&prev!==QDEFAULT&&QHIST.indexOf(prev)<0)QHIST=[prev].concat(QHIST);if(QDEFAULT)QHIST=[QDEFAULT].concat(QHIST.filter(x=>x!==QDEFAULT)).slice(0,100);bqCache();bqPush()
+function runDefaultCmd(raw){const dis=/^\s*\/(?:dbq|disable-base-query)\s*$/.test(raw);   // /dbq: same as "/bq " with nothing after it
+ const m=dis?null:DEFCMD.exec(raw);if(!dis&&(!m||m[1]==="!"))return null;   // "!/bq" is only a view
+ if(m&&m[2]===undefined){baseQueryView();return""}
+ const prev=QDEFAULT.trim();QDEFAULT=m?(m[3]||"").trim():"";if(QDEFAULT&&prev&&prev!==QDEFAULT&&QHIST.indexOf(prev)<0)QHIST=[prev].concat(QHIST);if(QDEFAULT)QHIST=[QDEFAULT].concat(QHIST.filter(x=>x!==QDEFAULT)).slice(0,100);bqCache();bqPush()
  return""}
 function visibleConvs(raw){return selectFor(effectiveQuery(raw))}
 function selectFor(q){
@@ -404,7 +405,7 @@ $("inp").onkeydown=e=>{const k=e.key,i=$("inp");
 $("search").oninput=()=>{renderList();if(CPS.open)cpsNarrow()};
 /* ---- search-box completion: Tab or Ctrl+Space at a word starting with "/" (or "//") lists the commands and fields ---- */
 const CPS={open:false,c:[],sel:0,start:0};
-const CVERBS=[["/fv ","filter by field value: /fv title x"],["/ft ","filter types (columns)"],["/at ","add types"],["/rt ","remove types"],["/s/","sort: /s/age, /s/tokens/desc"],["/sort/","sort (long form)"],["/g/","group by field"],["/fts ","full-text search over the conversations: /fts words"],["/bq ","base query: rest of the line runs as usual; Enter saves it as the query run in front of every query (/bq alone + Enter shows the current one)",true]];
+const CVERBS=[["/fv ","filter by field value: /fv title x"],["/ft ","filter types (columns)"],["/at ","add types"],["/rt ","remove types"],["/s/","sort: /s/age, /s/tokens/desc"],["/sort/","sort (long form)"],["/g/","group by field"],["/fts ","full-text search over the conversations: /fts words"],["/dbq ","disable base query: Enter clears the stored base query",true],["/bq ","base query: rest of the line runs as usual; Enter saves it as the query run in front of every query (/bq alone + Enter shows the current one)",true]];
 const CFIELDS=TYPES.filter(t=>t!=="fts");
 function cpsCands(q){
  const nb=/^(\s*!\/(?:base-query|bq))\s*$/.exec(q);   // "!/bq" alone + Tab: write the opposite of the base query after it ("!/bq" keeps the base query off)
