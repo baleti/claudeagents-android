@@ -76,6 +76,8 @@ class MainActivity : Activity() {
     private var syncLabel: TextView? = null
     private var totalPill: TextView? = null
     private var hiddenPill: TextView? = null
+    private var archivedPill: TextView? = null
+    private val acctPills = mutableMapOf<String, TextView>()
     // Whether a round is actively running right now -- kept separate from
     // the "Synced N ago" text so the two compose instead of one replacing
     // the other: while syncing, the label still shows how stale the data
@@ -715,7 +717,33 @@ class MainActivity : Activity() {
             val inv = if (eff.isEmpty()) "" else QueryDsl.invertBase(eff)
             if (inv.isNotEmpty()) setSearchText("!/bq $inv ")
         }
+        archivedPill = mkPill()
+        archivedPill?.setOnClickListener { startActivity(Intent(this, ArchiveActivity::class.java)) }
         root.addView(pillRow, rowParams)
+
+        // Account pills (same as the panel's "accounts" row): tap adds / removes "//account n" (several = OR)
+        val acctRow = LinearLayout(this)
+        acctRow.orientation = LinearLayout.HORIZONTAL
+        val acctLabel = TextView(this)
+        acctLabel.text = "accounts"
+        acctLabel.textSize = 11f
+        acctLabel.setTextColor(Theme.muted)
+        acctLabel.setPadding(0, 0, dp(8), 0)
+        acctRow.addView(acctLabel)
+        for (n in 1..3) {
+            val t = TextView(this)
+            t.textSize = 11f
+            t.setPadding(dp(10), dp(3), dp(10), dp(3))
+            val lp = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+            lp.rightMargin = dp(6)
+            acctRow.addView(t, lp)
+            acctPills[n.toString()] = t
+            t.setOnClickListener { toggleAccountFilter(n.toString()) }
+        }
+        val acctParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        acctParams.leftMargin = dp(12)
+        acctParams.bottomMargin = dp(4)
+        root.addView(acctRow, acctParams)
 
         val header = tableHeaderRow()
         header.setOnLongClickListener { confirmRepair(); true }
@@ -939,6 +967,22 @@ class MainActivity : Activity() {
         input.requestFocus()
     }
 
+    private fun accountsInBox(): List<String> =
+        Regex("(?:^|\\s)//account (\\S+)").find(searchQuery)?.groupValues?.get(1)?.split("||")?.filter { it.isNotEmpty() } ?: emptyList()
+
+    private fun toggleAccountFilter(n: String) {
+        val m = Regex("^(\\s*!?/(?:base-query|bq))(?=\\s|$)\\s*([\\s\\S]*)$").find(searchQuery)
+        val lead = if (m != null) m.groupValues[1] + " " else ""
+        var rest = if (m != null) m.groupValues[2] else searchQuery
+        val cur = accountsInBox()
+        val next = if (n in cur) cur - n else cur + n
+        val tok = if (next.isNotEmpty()) "//account " + next.joinToString("||") else ""
+        val re = Regex("(^|\\s)//account \\S+")
+        rest = if (cur.isNotEmpty()) run { var first = true; re.replace(rest) { x -> if (first) { first = false; x.groupValues[1] + tok } else x.groupValues[1] } } else rest.trim() + " " + tok
+        rest = rest.replace(Regex("\\s+"), " ").trim()
+        setSearchText(lead + rest + if (rest.isNotEmpty()) " " else "")
+    }
+
     private fun hiddenFilterActive(): Boolean = Regex("^\\s*!/(?:base-query|bq)(?=\\s|$)").containsMatchIn(searchQuery)
 
     // Most urgent status wins: busy > waiting > idle > frozen; nothing live-known = muted.
@@ -962,6 +1006,12 @@ class MainActivity : Activity() {
         val hidden = allConversations.filter { it.id !in keep }
         stylePill(totalPill, "\u03A3 ${allConversations.size}", worstStatusColor(allConversations), searchQuery.isBlank())
         stylePill(hiddenPill, "${hidden.size} hidden", worstStatusColor(hidden), hiddenFilterActive())
+        stylePill(archivedPill, "archived", Theme.muted, false)
+        val on = accountsInBox()
+        for ((n, t) in acctPills) {
+            val rows = shown.filter { ConversationColumns.accountNumber(it.account) == n }
+            stylePill(t, "$n  ${rows.size}", if (rows.isEmpty()) Theme.muted else worstStatusColor(rows), n in on)
+        }
     }
 
     private fun updateSearchPopup(anchor: EditText) {
