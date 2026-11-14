@@ -1006,7 +1006,7 @@ class MainActivity : Activity() {
         val hidden = allConversations.filter { it.id !in keep }
         stylePill(totalPill, "\u03A3 ${allConversations.size}", worstStatusColor(allConversations), searchQuery.isBlank())
         stylePill(hiddenPill, "${hidden.size} hidden", worstStatusColor(hidden), hiddenFilterActive())
-        stylePill(archivedPill, "archived", Theme.muted, false)
+        stylePill(archivedPill, "archived ${db.listConversations().count { !it.isLive }}", Theme.muted, false)
         val on = accountsInBox()
         for ((n, t) in acctPills) {
             val rows = shown.filter { ConversationColumns.accountNumber(it.account) == n }
