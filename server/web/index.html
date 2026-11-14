@@ -175,7 +175,8 @@ let QDEFAULT="";try{QDEFAULT=localStorage.getItem("query-default")||""}catch(e){
 let QHIST=[];try{QHIST=JSON.parse(localStorage.getItem("query-default-history")||"[]")}catch(e){}
 const baseCandidates=()=>{const c=QDEFAULT.trim();return(c?[c]:[]).concat(QHIST.filter(x=>x!==c))};
 const DEFCMD=/^\s*(!?)\/(?:base-query|bq)(?:(\s+)([\s\S]*))?$/;   // 1 "!" = negated (the rows the base query filters OUT), 2 whitespace, 3 rest
-const effectiveQuery=raw=>{const m=DEFCMD.exec(raw);if(m)return(m[3]||"").trim();return(QDEFAULT.trim()+" "+raw.trim()).trim()};
+const effectiveQuery=raw=>{const m=DEFCMD.exec(raw);if(m)return(m[3]||"").trim();const dq=/^\s*\/(?:dbq|disable-base-query)(?:\s+([\s\S]*))?$/.exec(raw);if(dq)return(dq[1]||"").trim();   // /dbq [rest]: base query off, the rest runs
+ return(QDEFAULT.trim()+" "+raw.trim()).trim()};
 function invertBase(q){
  // Opposite of a base query (query-dsl.md "!/bq"): terms are ANDed, so the complement is "any term fails".
  // Exact cases: one term (flip its !), or several negated terms on the same keys (they become one positive

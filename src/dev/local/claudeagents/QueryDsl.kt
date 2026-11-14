@@ -125,6 +125,7 @@ object QueryDsl {
     @Volatile var defaultQuery: String = ""
     /** Every non-empty base query ever set, most recent first. */
     @Volatile var baseHistory: List<String> = emptyList()
+    private val DISABLE_PREFIX = Regex("^\\s*/(?:dbq|disable-base-query)(?:\\s+(.*))?$", RegexOption.DOT_MATCHES_ALL)
     private val DISABLE_CMD = Regex("^\\s*/(?:dbq|disable-base-query)\\s*$")
     private val BQ_REST = Regex("^(\\s*/(?:base-query|bq)\\s+)(.*)$", RegexOption.DOT_MATCHES_ALL)
 
@@ -207,6 +208,7 @@ object QueryDsl {
      */
     fun effective(typed: String): String {
         DEFAULT_CMD.matchEntire(typed)?.let { return it.groupValues[3] }
+        DISABLE_PREFIX.matchEntire(typed)?.let { return it.groupValues[1] }   // /dbq [rest]: base query off, the rest runs
         return if (defaultQuery.isBlank()) typed else if (typed.isBlank()) defaultQuery else defaultQuery.trim() + " " + typed
     }
 
