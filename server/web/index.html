@@ -118,8 +118,8 @@ dialog select,dialog textarea{background:var(--inp);color:var(--txt);border:1px 
 const $=id=>document.getElementById(id);
 const H={"X-Requested-With":"claude-agents-web"};
 let convs=[],cur=null,last=0,polling=0,accounts=[];
-const COL=["#d97757","#6b8afd","#2fb67c","#b05ad6","#e0a030","#e5484d","#3aa0c8","#8a8f98"];
-const colOf=a=>COL[Math.max(0,["claude","claude2","claude3","claude4","claude5","claude6","claude7","claude8"].indexOf(a))%8];
+const COL=["#d97757","#6b8afd","#2fb67c","#b05ad6","#e0a030","#e5484d","#3aa0c8","#8a8f98","#1f9d8f"];
+const colOf=a=>COL[Math.max(0,["claude","claude2","claude3","claude4","claude5","claude6","claude7","claude8","claude-ksr"].indexOf(a))%9];
 function toast(t){const e=$("toast");e.textContent=t;e.style.display="block";setTimeout(()=>e.style.display="none",2500)}
 async function api(path,opt={}){
  const r=await fetch("/api/v1"+path,{...opt,headers:{...H,...(opt.body?{"Content-Type":"application/json"}:{})},credentials:"same-origin"});
