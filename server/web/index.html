@@ -150,18 +150,19 @@ const hm=ts=>ts?new Date(ts).toLocaleTimeString([], {hour:"2-digit",minute:"2-di
 function ago(e){const d=Date.now()/1000-e;if(d<60)return"now";if(d<3600)return Math.floor(d/60)+"m";if(d<86400)return Math.floor(d/3600)+"h";return Math.floor(d/86400)+"d"}
 /* ---- search box: the shared picker query DSL, the same engine (/dsl.js = ~/.config/quickshell/lib/dsl.js) and grammar as the
    search box of the desktop Ctrl+Alt+C panel: bare words, //field value (fuzzy field names), ! negation, a||b alternatives,
-   /s field [dir] sort (legacy /s/field/dir), and /fts[/live|/archive] words, /resume [words] = /fts/archive (full-text over the conversations, via claude-history). Scopes compose as a pipeline: a later /fts only searches what earlier /resume or /fts/<scope> terms selected.
+   /s field [dir] sort (legacy /s/field/dir), and /fts words (full text over the running conversations, via claude-history), /resume [words] (archived only) and /+resume [words] (running and archived); /resume anywhere in the query selects the archive, order does not matter.
    This list has the panel's title/status/tokens/msgs/age/path/account types; pid, host, tmux-* and hypr-* are not part of
    the web API, so filters on them match nothing. /ft /at /rt /g are parsed and inert here, as in the panel. */
 const TYPES=["title","status","tokens","msgs","age","path","account","fts"];   // "fts" is a filter, never a /s key
 const SCHEMA=window.DSL?DSL.makeSchema(TYPES,[],[]):null;
-const FTS_RE=/(^|\s)(!?)\/(?:fts(?:\/([a-z,-]+))?|(resume))(?=\s|$)(?:\s+((?:"[^"]*"|(?!\/)\S+)(?:\s+(?!\/)\S+)*))?/g;   // same token as the panel's
+const FTS_RE=/(^|\s)(!?)\/(?:fts(?:\/([a-z,-]+))?|(\+?resume))(?=\s|$)((?:\s+(?:"[^"]*"|(?!\/)\S+))*)/g;   // same token as the panel's: /fts [words], /resume [words], /+resume [words]; words run to the next /verb
 const FTSH={};   // lower-case term -> {session_id: score} once fetched, null while pending
-function ftsScope(keys){if(!keys)return{live:true,archive:true};const r=DSL.resolveNames(keys,["claude-live","claude-archive","tmux"]);return{live:r.indexOf("claude-live")>=0,archive:r.indexOf("claude-archive")>=0}}
-function ftsScopes(q){let u=null,m;FTS_RE.lastIndex=0;
- while((m=FTS_RE.exec(q))!==null){const s=ftsScope(m[3]||(m[4]?"archive":""));u=u?{live:u.live&&s.live,archive:u.archive&&s.archive}:s}   // left to right: each scoped term narrows what the later ones search (intersection, not union)
- return u}
-const rewriteFts=q=>q.replace(FTS_RE,(all,lead,neg,sc,rs,arg)=>arg?lead+neg+"/fv/fts \""+arg.replace(/"/g,"")+"\"":lead);   // `/fts words` is sugar for `/fv/fts words`
+/* scope is function composition, no slash chains: /fts words = the running conversations; /resume (anywhere in the query) = the archived ones only;
+   /+resume = running AND archived together (it adds to the current view instead of replacing it); a leftover /fts/<keys> is inert (matches nothing) */
+function ftsTokens(q){const out=[];let m;FTS_RE.lastIndex=0;while((m=FTS_RE.exec(q))!==null)out.push({neg:m[2]==="!",keys:m[3]||"",resume:m[4]==="resume",both:m[4]==="+resume",words:m[5]?m[5].trim():""});return out}
+function ftsScopes(q){const t=ftsTokens(q);if(!t.length)return null;if(t.some(x=>x.keys))return{live:false,archive:false};
+ const r=t.some(x=>x.resume),b=t.some(x=>x.both);return{live:!r,archive:r||b}}
+const stripFts=q=>q.replace(FTS_RE,(all,lead)=>lead);   // the /fts, /resume, /+resume tokens are handled apart from the shared DSL parse (words, quotes and all, go to claude-history as typed)
 const rowOf=c=>({title:c.title||"",status:c.live?(c.live.status||"live"):"archive",tokens:c.tokens!=null?String(c.tokens):"",
  msgs:c.msgs!=null?String(c.msgs):"",age:Math.max(0,Math.floor(Date.now()/1000-c.mtime))+"s",   // "<n>s": /s age = newest first, as in the panel
  path:(c.cwd||"").replace(/^\/home\/[^/]+(?=\/|$)/,"~"),
@@ -225,11 +226,13 @@ function visibleConvs(raw){return selectFor(effectiveQuery(raw))}
 function selectFor(q){
  if(!q)return convs;
  if(!SCHEMA){const l=q.toLowerCase();return convs.filter(c=>(c.title||"").toLowerCase().includes(l))}   // engine failed to load: plain substring
- const scopes=ftsScopes(q),parsed=DSL.parseQuery(SCHEMA,rewriteFts(q));
+ const scopes=ftsScopes(q),parsed=DSL.parseQuery(SCHEMA,stripFts(q));
+ const ft=ftsTokens(q).filter(x=>x.words);for(const x of ft)fetchFts(x.words.toLowerCase());
+ const ext=(row,ty,v)=>ty!=="fts"?null:(h=>!!h&&h[row._c.id]!==undefined)(FTSH[String(v).toLowerCase()]);   // /fv/fts word (typed by hand) still works
  for(const t of parsed.terms)if(t.scoped&&t.value&&DSL.resolveNames(t.keys,TYPES).indexOf("fts")>=0)fetchFts(String(t.value).toLowerCase());
- const ext=(row,ty,v)=>ty!=="fts"?null:(h=>!!h&&h[row._c.id]!==undefined)(FTSH[String(v).toLowerCase()]);
  let rows=convs.map(rowOf);
  if(scopes)rows=rows.filter(r=>r._c.live?scopes.live:scopes.archive);
+ for(const x of ft)rows=rows.filter(r=>{const h=FTSH[x.words.toLowerCase()];return !!h&&((h[r._c.id]!==undefined)!==x.neg)});   // a term not fetched yet hides everything until its hits arrive ("Searching...")
  return DSL.selectRows(SCHEMA,parsed,rows,r=>(r.title+" "+r.status+" "+r.path+" "+r.account.join(" ")).toLowerCase(),ext).map(r=>r._c)}
 function renderList(){
  const raw=$("search").value,vis=visibleConvs(raw);
@@ -410,7 +413,7 @@ $("inp").onkeydown=e=>{const k=e.key,i=$("inp");
 $("search").oninput=()=>{renderList();if(CPS.open)cpsNarrow()};
 /* ---- search-box completion: Tab or Ctrl+Space at a word starting with "/" (or "//") lists the commands and fields ---- */
 const CPS={open:false,c:[],sel:0,start:0};
-const CVERBS=[["/fv ","filter by field value: /fv title x"],["/ft ","filter types (columns)"],["/at ","add types"],["/rt ","remove types"],["/s ","sort: /s age, /s tokens desc"],["/sort ","sort (long form)"],["/g ","group by field"],["/fts ","full-text search over the conversations: /fts words"],["/resume ","archived conversations, to resume: /resume [words]"],["/dbq ","disable base query: Enter clears the stored base query",true],["/bq ","base query: rest of the line runs as usual; Enter saves it as the query run in front of every query (/bq alone + Enter shows the current one)",true]];
+const CVERBS=[["/fv ","filter by field value: /fv title x"],["/ft ","filter types (columns)"],["/at ","add types"],["/rt ","remove types"],["/s ","sort: /s age, /s tokens desc"],["/sort ","sort (long form)"],["/g ","group by field"],["/fts ","full-text search over the conversations: /fts words"],["/resume ","only archived conversations, to resume: /resume [words]"],["/+resume ","running AND archived conversations together: /+resume [words]"],["/dbq ","disable base query: Enter clears the stored base query",true],["/bq ","base query: rest of the line runs as usual; Enter saves it as the query run in front of every query (/bq alone + Enter shows the current one)",true]];
 const CFIELDS=TYPES.filter(t=>t!=="fts");
 function cpsCands(q){
  const nb=/^(\s*!\/(?:base-query|bq))\s*$/.exec(q);   // "!/bq" alone + Tab: write the opposite of the base query after it ("!/bq" keeps the base query off)
@@ -431,9 +434,7 @@ function cpsCands(q){
  if(sm){const verb="/"+sm[1]+"/";
   if(sm[3]!=null){for(const d of ["asc","desc"])if(d.startsWith(sm[3]))out.push([verb+sm[2]+"/"+d+" ","direction"]);return[st,out]}
   for(const n of CFIELDS)if(n.startsWith(sm[2]))out.push([verb+n+(sm[1][0]=="s"?"":" "),(sm[1][0]=="s"?"sort by ":"group by ")+n]);return[st,out]}
- const fm=/^\/fts\/([^/\s]*)$/.exec(f);
- if(fm){for(const n of ["live","archive"])if(n.startsWith(fm[1]))out.push(["/fts/"+n+" ","only "+n+" conversations"]);return[st,out]}
- if(!f.slice(1).includes("/")){for(const [v,l,first] of CVERBS)if(v.startsWith(f)&&(!first||st===0))out.push([v,l]);
+  if(!f.slice(1).includes("/")){for(const [v,l,first] of CVERBS)if(v.startsWith(f)&&(!first||st===0))out.push([v,l]);
   for(const n of CFIELDS)if(("/s "+n).startsWith(f))out.push(["/s "+n,"sort by "+n])}
  return[st,out]}
 function cpsDraw(){const el=$("cp");if(!CPS.open||!CPS.c.length){el.style.display="none";return}

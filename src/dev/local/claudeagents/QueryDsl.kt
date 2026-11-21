@@ -112,7 +112,9 @@ object QueryDsl {
     private val ACTIVE_VERBS = listOf(
         VerbInfo("fv", "filter-value", "keep rows whose value matches (substring)"),
         VerbInfo("s", "sort", "order rows by the keys, /s key,key desc"),
-        VerbInfo("fts", "full-text-search", "full text of every conversation, live and archived: /fts words up to the next /verb"),
+        VerbInfo("fts", "full-text-search", "full text of the running conversations: /fts words up to the next /verb"),
+        VerbInfo("resume", "resume", "only the archived conversations, to resume (anywhere in the query): /resume [words]"),
+        VerbInfo("+resume", "+resume", "running AND archived conversations together: /+resume [words]"),
         VerbInfo("bq", "base-query", "base query: rest of the line runs as usual; Enter saves it as the query run in front of every query (/bq alone + Enter shows the current one)"),
         VerbInfo("dbq", "disable-base-query", "disable base query: Enter clears the stored base query, nothing is run in front of queries any more")
     )
@@ -130,7 +132,7 @@ object QueryDsl {
     private val BQ_REST = Regex("^(\\s*/(?:base-query|bq)\\s+)(.*)$", RegexOption.DOT_MATCHES_ALL)
 
     private val NEG_BQ = Regex("^(\\s*!/(?:base-query|bq))\\s*$")
-    private val VERB_TOKEN = Regex("^/(fv|filter-value|ft|filter-type|at|add-type|rt|remove-type|s|sort|g|group|fts|full-text-search|bq|base-query)(/\\S*)?$")
+    private val VERB_TOKEN = Regex("^/(fv|filter-value|ft|filter-type|at|add-type|rt|remove-type|s|sort|g|group|fts|full-text-search|resume|\\+resume|bq|base-query)(/\\S*)?$")
     /** Any non-empty prefix of ascending / descending (the shared parse_direction rule). */
     private fun isDirectionWord(w: String): Boolean { val d = w.lowercase(); return d.isNotEmpty() && ("ascending".startsWith(d) || "descending".startsWith(d)) }
     private fun isVerbTok(t: String): Boolean { val u = t.removePrefix("!"); return Regex("^//[^\\s/]*$").matches(u) || VERB_TOKEN.matches(u) }
@@ -164,7 +166,7 @@ object QueryDsl {
                         tx += " " + toks[i++]
                         if (Regex("^/(s|sort)$").matches(u) && keysTok(toks.getOrNull(i)) && isDirectionWord(toks[i])) tx += " " + toks[i++]
                     }
-                } else if (Regex("^/(fts|full-text-search)").containsMatchIn(u)) while (i < toks.size && !isVerbTok(toks[i])) tx += " " + toks[i++]
+                } else if (Regex("^/(fts|full-text-search|resume|\\+resume)").containsMatchIn(u)) while (i < toks.size && !isVerbTok(toks[i])) tx += " " + toks[i++]
                 items.add(It(tx, false, null, "")); continue
             }
             items.add(It(null, neg, null, u)); i++
@@ -280,7 +282,8 @@ object QueryDsl {
         "rt" to "rt", "remove-type" to "rt",
         "s" to "s", "sort" to "s",
         "g" to "g", "group" to "g",   // parsed for correct arity, inert here (no groups on the phone)
-        "fts" to "fts", "full-text-search" to "fts"
+        "fts" to "fts", "full-text-search" to "fts",
+        "resume" to "resume", "+resume" to "+resume"   // scope by composition, no /fts/<scope> slash chains: /resume = archived only, /+resume = running AND archived
     )
 
     private data class Token(val raw: String, val isQuoted: Boolean, val spanStart: Int, val unterminated: Boolean = false, val neg: Boolean = false)
@@ -425,16 +428,21 @@ object QueryDsl {
     /** Terms of every `/fts` in [query] that still need fetching from the relay (not in [ftsHits] yet). */
     fun pendingFtsTerms(typed: String): List<String> = pendingFtsTermsOf(effective(typed))
 
+    private val FTS_VERBS = setOf("fts", "resume", "+resume")
+
+    /** One word of a `/fts` argument as the backend wants it: a "quoted phrase" keeps its quotes (an exact substring search), `!` negates. */
+    private fun ftsWord(t: Token): String = (if (t.neg) "!" else "") + (if (t.isQuoted) "\"" + t.raw + (if (t.unterminated) "" else "\"") else t.raw)
+
     private fun pendingFtsTermsOf(query: String): List<String> {
         val tokens = tokenize(query)
         val out = mutableListOf<String>()
         var idx = 0
         while (idx < tokens.size) {
             val p = parseVerbToken(tokens[idx])
-            if (p != null && p.verb == "fts") {
+            if (p != null && p.verb in FTS_VERBS) {
                 val words = mutableListOf<String>()
                 var j = idx + 1
-                while (j < tokens.size && !isVerbArgToken(tokens[j])) { words.add((if (tokens[j].neg) "!" else "") + tokens[j].raw); j++ }
+                while (j < tokens.size && !isVerbArgToken(tokens[j])) { words.add(ftsWord(tokens[j])); j++ }
                 val t = words.joinToString(" ").lowercase()
                 if (t.isNotEmpty() && !ftsHits.containsKey(t) && t !in out) out.add(t)
                 idx = j
@@ -474,7 +482,10 @@ object QueryDsl {
         var sortDescending = false
         var ftsLive = false
         var ftsArchive = false
-        var ftsSeen = false   // scopes intersect left to right: a later /fts only searches what an earlier scoped one selected
+        var ftsSeen = false
+        var ftsResume = false   // /resume anywhere = the archive only; /+resume = running AND archived; plain /fts = running only; /fts/<keys> is inert
+        var ftsBoth = false
+        var ftsInert = false
 
         var idx = 0
         while (idx < tokens.size) {
@@ -504,18 +515,16 @@ object QueryDsl {
                     idx += 1
                 }
             }
-            if (verb == "fts") {
-                // `/fts[/live|/archive] words`: every word up to the next /verb is one full-text query
+            if (verb in FTS_VERBS) {
+                // `/fts words`, `/resume [words]`, `/+resume [words]`: every word up to the next /verb is one full-text query
                 // (same rule as the web page and the desktop panel, query-dsl.md "App verbs")
                 val words = mutableListOf<String>()
                 var j = idx + 1
-                while (j < tokens.size && !isVerbArgToken(tokens[j])) { words.add((if (tokens[j].neg) "!" else "") + tokens[j].raw); j++ }
-                val known = listOf("claude-live", "claude-archive", "tmux")
-                val keys = (via ?: "").lowercase().split(",").filter { it.isNotEmpty() }
-                val hit = known.filter { n -> keys.any { k -> if (known.any { it == k }) n == k else n.contains(k) } }
-                val hl = if (keys.isNotEmpty()) "claude-live" in hit else true
-                val ha = if (keys.isNotEmpty()) "claude-archive" in hit else true
-                if (ftsSeen) { ftsLive = ftsLive && hl; ftsArchive = ftsArchive && ha } else { ftsLive = hl; ftsArchive = ha; ftsSeen = true }
+                while (j < tokens.size && !isVerbArgToken(tokens[j])) { words.add(ftsWord(tokens[j])); j++ }
+                ftsSeen = true
+                if (via != null) ftsInert = true
+                if (verb == "resume") ftsResume = true
+                if (verb == "+resume") ftsBoth = true
                 if (words.isNotEmpty()) filterTerms.add(FilterTerm(null, false, words.joinToString(" "), tok.neg, false, true))
                 idx = j
                 continue
@@ -567,7 +576,11 @@ object QueryDsl {
         }
 
         var rows = if (filterTerms.isEmpty()) all else all.filter { row -> filterTerms.all { it.matches(row) } }
-        if (ftsSeen) rows = rows.filter { if (it.isLive) ftsLive else ftsArchive }
+        if (ftsSeen) {
+            ftsLive = !ftsInert && !ftsResume
+            ftsArchive = !ftsInert && (ftsResume || ftsBoth)
+            rows = rows.filter { if (it.isLive) ftsLive else ftsArchive }
+        }
 
         if (hasSort && !sortInert && sortChain != null) {
             val chain = sortChain
@@ -643,7 +656,7 @@ object QueryDsl {
             // /bq is a command, not a pipeline stage: only the very first token of the query
             return ACTIVE_VERBS.filter { it.short.contains(frag) && (tokens.size == 1 || (it.short != "bq" && it.short != "dbq")) }
                 // /fv takes an open-ended value so its keys stay slash-glued; /s (closed vocabulary) takes its keys as the next token
-                .map { Suggestion("/${it.short}", "/${it.long}", it.description, if (it.short == "bq" || it.short == "dbq" || it.short == "s") "/${it.short} " else "/${it.short}/") }
+                .map { Suggestion("/${it.short}", "/${it.long}", it.description, if (it.short in setOf("bq", "dbq", "s", "fts", "resume", "+resume")) "/${it.short} " else "/${it.short}/") }
         }
 
         // Stage 1b: the NEW-form keys / direction tokens of a bare `/s` (2026-11-21): `/s <keys>` and `/s <keys> <dir>`.
