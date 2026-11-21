@@ -183,7 +183,7 @@ def build_account_map():
         if uuid:
             m[uuid] = {
                 "dir_key": key,
-                "label": oa.get("displayName") or oa.get("emailAddress") or key,
+                "label": "claude1" if key == "claude" else key,  # account number, not the user name (email stays in "email")
                 "email": oa.get("emailAddress"),
             }
     return m
@@ -308,24 +308,32 @@ def cwd_to_project_dir(cwd, dir_key=None):
 
 
 def owner_account_uuid_of_jsonl(path):
-    # The bridge-session line is NOT always near the top: a resumed session
-    # gets it appended later (line ~290 in a real one), so scanning only the
-    # first lines made those conversations show account "unknown". Read the
-    # whole file but only json-parse lines that contain the marker.
+    # Preferred: the "session-owner" line Claude Code writes at the top when a
+    # session is created (the account that really owns it). Fallback: the first
+    # "bridge-session" owner. That one is appended later and can name whatever
+    # account a RESUME ran under, so it is only a fallback. Neither is reliably
+    # in the first few lines, so scan the file, json-parsing only marker lines.
+    bridge = None
     try:
         with open(path, "r", errors="ignore") as f:
             for line in f:
-                if '"bridge-session"' not in line or "ownerAccountUuid" not in line:
+                if '"session-owner"' in line:
+                    kind, key = "session-owner", "accountUuid"
+                elif bridge is None and '"bridge-session"' in line:
+                    kind, key = "bridge-session", "ownerAccountUuid"
+                else:
                     continue
                 try:
                     d = json.loads(line)
                 except Exception:
                     continue
-                if d.get("type") == "bridge-session" and d.get("ownerAccountUuid"):
-                    return d["ownerAccountUuid"]
+                if d.get("type") == kind and d.get(key):
+                    if kind == "session-owner":
+                        return d[key]
+                    bridge = d[key]
     except Exception:
         pass
-    return None
+    return bridge
 
 
 def account_dir_key_of_session(session_id):
