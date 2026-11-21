@@ -96,7 +96,7 @@ dialog select,dialog textarea{background:var(--inp);color:var(--txt);border:1px 
  <section id="side">
   <header><h1>Claude Agents<div class="sub" id="hs"></div></h1>
    <button id="bNew" title="New chat" aria-label="New chat"><span class="ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z"/></svg></span></button></header>
-  <input id="search" placeholder="Search chats" autocomplete="off" title="Same query language as the Ctrl+Alt+C panel: words, //title x, //status busy, //account name, !word, a||b, /s/age, /fts words (full text), /fts/live, /fts/archive">
+  <input id="search" placeholder="Search chats" autocomplete="off" title="Same query language as the Ctrl+Alt+C panel: words, //title x, //status busy, //account name, !word, a||b, /s age, /fts words (full text), /fts/live, /fts/archive">
   <div id="list"></div>
  </section>
  <section id="main">
@@ -118,8 +118,8 @@ dialog select,dialog textarea{background:var(--inp);color:var(--txt);border:1px 
 const $=id=>document.getElementById(id);
 const H={"X-Requested-With":"claude-agents-web"};
 let convs=[],cur=null,last=0,polling=0,accounts=[];
-const COL=["#d97757","#6b8afd","#2fb67c","#b05ad6","#e0a030","#e5484d","#3aa0c8","#8a8f98","#1f9d8f"];
-const colOf=a=>COL[Math.max(0,["claude","claude2","claude3","claude4","claude5","claude6","claude7","claude8","claude-ksr"].indexOf(a))%9];
+const COL=["#d97757","#6b8afd","#2fb67c","#b05ad6","#e0a030","#e5484d","#3aa0c8","#1f9d8f"];
+const colOf=a=>COL[Math.max(0,["claude","claude2","claude3","claude4","claude5","claude6","claude7","claude-ksr"].indexOf(a))%8];
 function toast(t){const e=$("toast");e.textContent=t;e.style.display="block";setTimeout(()=>e.style.display="none",2500)}
 async function api(path,opt={}){
  const r=await fetch("/api/v1"+path,{...opt,headers:{...H,...(opt.body?{"Content-Type":"application/json"}:{})},credentials:"same-origin"});
@@ -150,20 +150,20 @@ const hm=ts=>ts?new Date(ts).toLocaleTimeString([], {hour:"2-digit",minute:"2-di
 function ago(e){const d=Date.now()/1000-e;if(d<60)return"now";if(d<3600)return Math.floor(d/60)+"m";if(d<86400)return Math.floor(d/3600)+"h";return Math.floor(d/86400)+"d"}
 /* ---- search box: the shared picker query DSL, the same engine (/dsl.js = ~/.config/quickshell/lib/dsl.js) and grammar as the
    search box of the desktop Ctrl+Alt+C panel: bare words, //field value (fuzzy field names), ! negation, a||b alternatives,
-   /s/field[/dir] sort, and /fts[/live|/archive] words (full-text over the conversations, via claude-history).
+   /s field [dir] sort (legacy /s/field/dir), and /fts[/live|/archive] words, /resume [words] = /fts/archive (full-text over the conversations, via claude-history). Scopes compose as a pipeline: a later /fts only searches what earlier /resume or /fts/<scope> terms selected.
    This list has the panel's title/status/tokens/msgs/age/path/account types; pid, host, tmux-* and hypr-* are not part of
    the web API, so filters on them match nothing. /ft /at /rt /g are parsed and inert here, as in the panel. */
 const TYPES=["title","status","tokens","msgs","age","path","account","fts"];   // "fts" is a filter, never a /s key
 const SCHEMA=window.DSL?DSL.makeSchema(TYPES,[],[]):null;
-const FTS_RE=/(^|\s)(!?)\/fts(?:\/([a-z,-]+))?(?=\s|$)(?:\s+((?:"[^"]*"|(?!\/)\S+)(?:\s+(?!\/)\S+)*))?/g;   // same token as the panel's
+const FTS_RE=/(^|\s)(!?)\/(?:fts(?:\/([a-z,-]+))?|(resume))(?=\s|$)(?:\s+((?:"[^"]*"|(?!\/)\S+)(?:\s+(?!\/)\S+)*))?/g;   // same token as the panel's
 const FTSH={};   // lower-case term -> {session_id: score} once fetched, null while pending
 function ftsScope(keys){if(!keys)return{live:true,archive:true};const r=DSL.resolveNames(keys,["claude-live","claude-archive","tmux"]);return{live:r.indexOf("claude-live")>=0,archive:r.indexOf("claude-archive")>=0}}
 function ftsScopes(q){let u=null,m;FTS_RE.lastIndex=0;
- while((m=FTS_RE.exec(q))!==null){const s=ftsScope(m[3]);u=u?{live:u.live||s.live,archive:u.archive||s.archive}:s}
+ while((m=FTS_RE.exec(q))!==null){const s=ftsScope(m[3]||(m[4]?"archive":""));u=u?{live:u.live&&s.live,archive:u.archive&&s.archive}:s}   // left to right: each scoped term narrows what the later ones search (intersection, not union)
  return u}
-const rewriteFts=q=>q.replace(FTS_RE,(all,lead,neg,sc,arg)=>arg?lead+neg+"/fv/fts \""+arg.replace(/"/g,"")+"\"":lead);   // `/fts words` is sugar for `/fv/fts words`
+const rewriteFts=q=>q.replace(FTS_RE,(all,lead,neg,sc,rs,arg)=>arg?lead+neg+"/fv/fts \""+arg.replace(/"/g,"")+"\"":lead);   // `/fts words` is sugar for `/fv/fts words`
 const rowOf=c=>({title:c.title||"",status:c.live?(c.live.status||"live"):"archive",tokens:c.tokens!=null?String(c.tokens):"",
- msgs:c.msgs!=null?String(c.msgs):"",age:Math.max(0,Math.floor(Date.now()/1000-c.mtime))+"s",   // "<n>s": /s/age = newest first, as in the panel
+ msgs:c.msgs!=null?String(c.msgs):"",age:Math.max(0,Math.floor(Date.now()/1000-c.mtime))+"s",   // "<n>s": /s age = newest first, as in the panel
  path:(c.cwd||"").replace(/^\/home\/[^/]+(?=\/|$)/,"~"),
  account:[c.account_label||"",c.account||""].filter(Boolean),_c:c});
 let ftsPending=0;
@@ -189,7 +189,11 @@ function invertBase(q){
   const t=toks[i],neg=t[0]==="!",u=neg?t.slice(1):t;let k=null,mm;
   if((mm=/^\/\/([a-z,-]*)$/.exec(u)))k=mm[1];else if((mm=/^\/(?:fv|filter-value)\/([a-z,-]*)$/.exec(u)))k=mm[1];
   if(k!==null&&k!==""){const nx=toks[i+1];if(nx!==undefined&&!isVerb(nx)){items.push({f:1,neg,keys:k,value:nx});i+=2;continue}items.push({o:t});i++;continue}
-  if(isVerb(t)){let tx=t;i++;if(/^\/(fts|full-text-search)/.test(u))while(i<toks.length&&!isVerb(toks[i]))tx+=" "+toks[i++];items.push({o:tx});continue}
+  if(isVerb(t)){let tx=t;i++;
+   if(/^\/(ft|filter-type|at|add-type|rt|remove-type|s|sort|g|group)$/.test(u)){   // closed-vocabulary verbs: keys are the next token (+ a bare direction for /s), copied unchanged
+    const kt=x=>x!==undefined&&x!==""&&!/^[!"'\/]/.test(x),isDir=x=>x!==""&&("ascending".startsWith(x.toLowerCase())||"descending".startsWith(x.toLowerCase()));
+    if(kt(toks[i])){tx+=" "+toks[i++];if(/^\/(s|sort)$/.test(u)&&kt(toks[i])&&isDir(toks[i]))tx+=" "+toks[i++]}}
+   else if(/^\/(fts|full-text-search)/.test(u))while(i<toks.length&&!isVerb(toks[i]))tx+=" "+toks[i++];items.push({o:tx});continue}
   items.push({f:1,neg,keys:null,value:u});i++}
  const fs=items.filter(x=>x.f);if(!fs.length)return q.trim();
  const merge=fs.length>1&&fs.every(x=>x.neg&&x.keys===fs[0].keys&&x.value[0]!=='"'&&x.value.indexOf('"')<0);
@@ -406,7 +410,7 @@ $("inp").onkeydown=e=>{const k=e.key,i=$("inp");
 $("search").oninput=()=>{renderList();if(CPS.open)cpsNarrow()};
 /* ---- search-box completion: Tab or Ctrl+Space at a word starting with "/" (or "//") lists the commands and fields ---- */
 const CPS={open:false,c:[],sel:0,start:0};
-const CVERBS=[["/fv ","filter by field value: /fv title x"],["/ft ","filter types (columns)"],["/at ","add types"],["/rt ","remove types"],["/s/","sort: /s/age, /s/tokens/desc"],["/sort/","sort (long form)"],["/g/","group by field"],["/fts ","full-text search over the conversations: /fts words"],["/dbq ","disable base query: Enter clears the stored base query",true],["/bq ","base query: rest of the line runs as usual; Enter saves it as the query run in front of every query (/bq alone + Enter shows the current one)",true]];
+const CVERBS=[["/fv ","filter by field value: /fv title x"],["/ft ","filter types (columns)"],["/at ","add types"],["/rt ","remove types"],["/s ","sort: /s age, /s tokens desc"],["/sort ","sort (long form)"],["/g ","group by field"],["/fts ","full-text search over the conversations: /fts words"],["/resume ","archived conversations, to resume: /resume [words]"],["/dbq ","disable base query: Enter clears the stored base query",true],["/bq ","base query: rest of the line runs as usual; Enter saves it as the query run in front of every query (/bq alone + Enter shows the current one)",true]];
 const CFIELDS=TYPES.filter(t=>t!=="fts");
 function cpsCands(q){
  const nb=/^(\s*!\/(?:base-query|bq))\s*$/.exec(q);   // "!/bq" alone + Tab: write the opposite of the base query after it ("!/bq" keeps the base query off)
@@ -414,7 +418,13 @@ function cpsCands(q){
  const bm0=/^(\s*\/(?:base-query|bq))(?:\s+([\s\S]*))?$/.exec(q),bm=bm0?[bm0[0],bm0[1]+" ",bm0[2]||""]:null;   // "/bq <frag>" + Tab: base-query history, current first
  if(bm){const cur=QDEFAULT.trim(),h=baseCandidates().filter(x=>x.startsWith(bm[2].trim())&&x!==bm[2].trim()).map(x=>[x,x===cur?"current":"previous"]);if(h.length)return[bm[1].length,h]}
  const m=/\s(?=\S*$)/.exec(q);let st=m?m.index+1:0;if(q[st]==="!")st++;
- const f=q.slice(st);if(f[0]!=="/")return[st,[]];
+ const f=q.slice(st);
+ if(f[0]!=="/"){   // the NEW-form keys / direction tokens of a bare /s or /g: `/s <keys> <dir>`
+  const out0=[],pt=q.slice(0,st).trim().split(/\s+/).filter(Boolean),last=pt[pt.length-1]||"",prev=pt[pt.length-2]||"";
+  if(/^\/(s|sort|g|group)$/.test(last)){const cm=f.lastIndexOf(","),fr=f.slice(cm+1),sort=/^\/(s|sort)$/.test(last);
+   for(const n of CFIELDS)if(n.startsWith(fr)&&n!==fr)out0.push([n+(sort?"":" "),(sort?"sort by ":"group by ")+n]);return[st+cm+1,out0]}
+  if(/^\/(s|sort)$/.test(prev)&&!/^[!"'\/]/.test(last)){for(const d of ["asc","desc"])if(d.startsWith(f.toLowerCase())&&d!==f)out0.push([d+" ","direction"]);return[st,out0]}
+  return[st,[]]}
  const out=[];
  if(f.startsWith("//")){for(const n of CFIELDS)if(("//"+n).startsWith(f)||n.startsWith(f.slice(2)))out.push(["//"+n+" ","field: match only in "+n]);return[st,out]}
  const sm=/^\/(s|sort|g|group)\/([^/]*)(?:\/(.*))?$/.exec(f);
@@ -424,7 +434,7 @@ function cpsCands(q){
  const fm=/^\/fts\/([^/\s]*)$/.exec(f);
  if(fm){for(const n of ["live","archive"])if(n.startsWith(fm[1]))out.push(["/fts/"+n+" ","only "+n+" conversations"]);return[st,out]}
  if(!f.slice(1).includes("/")){for(const [v,l,first] of CVERBS)if(v.startsWith(f)&&(!first||st===0))out.push([v,l]);
-  for(const n of CFIELDS)if(("/s/"+n).startsWith(f))out.push(["/s/"+n,"sort by "+n])}
+  for(const n of CFIELDS)if(("/s "+n).startsWith(f))out.push(["/s "+n,"sort by "+n])}
  return[st,out]}
 function cpsDraw(){const el=$("cp");if(!CPS.open||!CPS.c.length){el.style.display="none";return}
  const r=$("search").getBoundingClientRect();el.style.left=r.left+"px";el.style.top=(r.bottom+4)+"px";el.style.minWidth=Math.max(240,r.width)+"px";el.style.display="block";
@@ -433,7 +443,7 @@ function cpsDraw(){const el=$("cp");if(!CPS.open||!CPS.c.length){el.style.displa
 function cpsClose(){CPS.open=false;$("cp").style.display="none"}
 function cpsApply(i){const q=$("search").value,c=CPS.c[i];if(!c)return;
  $("search").value=q.slice(0,CPS.start)+c[0];cpsClose();$("search").focus();renderList();
- const [st,n]=cpsCands($("search").value);if(n.length&&/\/$/.test(c[0])){CPS.start=st;CPS.c=n;CPS.sel=0;CPS.open=true;cpsDraw()}}   // "/s/" goes straight on to the field list
+ const [st,n]=cpsCands($("search").value);if(n.length&&(/\/$/.test(c[0])||/^\/(s|sort|g|group) $/.test(c[0]))){CPS.start=st;CPS.c=n;CPS.sel=0;CPS.open=true;cpsDraw()}}   // "/s " (and the legacy "/s/") goes straight on to the field list
 function cpsStart(){const [st,c]=cpsCands($("search").value);if(!c.length)return false;
  if(c.length==1){CPS.start=st;CPS.c=c;cpsApply(0);return true}
  CPS.start=st;CPS.c=c;CPS.sel=0;CPS.open=true;cpsDraw();return true}

@@ -111,7 +111,7 @@ object QueryDsl {
     // the popup, matching the app-launcher precedent in the doc.
     private val ACTIVE_VERBS = listOf(
         VerbInfo("fv", "filter-value", "keep rows whose value matches (substring)"),
-        VerbInfo("s", "sort", "order rows by the keys, /s/key,key/desc"),
+        VerbInfo("s", "sort", "order rows by the keys, /s key,key desc"),
         VerbInfo("fts", "full-text-search", "full text of every conversation, live and archived: /fts words up to the next /verb"),
         VerbInfo("bq", "base-query", "base query: rest of the line runs as usual; Enter saves it as the query run in front of every query (/bq alone + Enter shows the current one)"),
         VerbInfo("dbq", "disable-base-query", "disable base query: Enter clears the stored base query, nothing is run in front of queries any more")
@@ -131,6 +131,8 @@ object QueryDsl {
 
     private val NEG_BQ = Regex("^(\\s*!/(?:base-query|bq))\\s*$")
     private val VERB_TOKEN = Regex("^/(fv|filter-value|ft|filter-type|at|add-type|rt|remove-type|s|sort|g|group|fts|full-text-search|bq|base-query)(/\\S*)?$")
+    /** Any non-empty prefix of ascending / descending (the shared parse_direction rule). */
+    private fun isDirectionWord(w: String): Boolean { val d = w.lowercase(); return d.isNotEmpty() && ("ascending".startsWith(d) || "descending".startsWith(d)) }
     private fun isVerbTok(t: String): Boolean { val u = t.removePrefix("!"); return Regex("^//[^\\s/]*$").matches(u) || VERB_TOKEN.matches(u) }
 
     /**
@@ -154,7 +156,15 @@ object QueryDsl {
             }
             if (isVerbTok(t)) {
                 var tx = t; i++
-                if (Regex("^/(fts|full-text-search)").containsMatchIn(u)) while (i < toks.size && !isVerbTok(toks[i])) tx += " " + toks[i++]
+                if (Regex("^/(ft|filter-type|at|add-type|rt|remove-type|s|sort|g|group)$").matches(u)) {
+                    // closed-vocabulary verbs: the keys are the next token (query-dsl.md "Keys token", 2026-11-21), and /s may be
+                    // followed by a bare direction word - copied unchanged, never flipped as a search word
+                    fun keysTok(x: String?) = x != null && x.isNotEmpty() && x[0] !in "!\"'/"
+                    if (keysTok(toks.getOrNull(i))) {
+                        tx += " " + toks[i++]
+                        if (Regex("^/(s|sort)$").matches(u) && keysTok(toks.getOrNull(i)) && isDirectionWord(toks[i])) tx += " " + toks[i++]
+                    }
+                } else if (Regex("^/(fts|full-text-search)").containsMatchIn(u)) while (i < toks.size && !isVerbTok(toks[i])) tx += " " + toks[i++]
                 items.add(It(tx, false, null, "")); continue
             }
             items.add(It(null, neg, null, u)); i++
@@ -269,6 +279,7 @@ object QueryDsl {
         "at" to "at", "add-type" to "at",
         "rt" to "rt", "remove-type" to "rt",
         "s" to "s", "sort" to "s",
+        "g" to "g", "group" to "g",   // parsed for correct arity, inert here (no groups on the phone)
         "fts" to "fts", "full-text-search" to "fts"
     )
 
@@ -345,6 +356,8 @@ object QueryDsl {
         }
         return Field.values().filter { it in hit }
     }
+
+    private fun isKeysToken(tok: Token?): Boolean = tok != null && !tok.isQuoted && !tok.neg && tok.raw.isNotEmpty() && !tok.raw.startsWith("/")
 
     private fun isVerbArgToken(tok: Token?): Boolean = tok != null && parseVerbToken(tok) != null
 
@@ -461,6 +474,7 @@ object QueryDsl {
         var sortDescending = false
         var ftsLive = false
         var ftsArchive = false
+        var ftsSeen = false   // scopes intersect left to right: a later /fts only searches what an earlier scoped one selected
 
         var idx = 0
         while (idx < tokens.size) {
@@ -478,7 +492,18 @@ object QueryDsl {
                 idx += 1
                 continue
             }
-            val (verb, via, dirPart, bad) = parsed
+            var (verb, via, dirPart, bad) = parsed
+            // closed-vocabulary verbs take their keys as the NEXT token (2026-11-21): `/s age,msgs desc`, `/at uuid`
+            // (the `/verb/keys` slash form stays as the legacy spelling). Keys token: not quoted, not `!`-negated, not "/"-led;
+            // the /s direction is the token after it only when it is exactly a direction word.
+            if (via == null && !bad && verb in setOf("ft", "at", "rt", "s", "g") && isKeysToken(tokens.getOrNull(idx + 1))) {
+                via = tokens[idx + 1].raw
+                idx += 1
+                if (verb == "s" && isKeysToken(tokens.getOrNull(idx + 1)) && isDirectionWord(tokens[idx + 1].raw)) {
+                    dirPart = tokens[idx + 1].raw
+                    idx += 1
+                }
+            }
             if (verb == "fts") {
                 // `/fts[/live|/archive] words`: every word up to the next /verb is one full-text query
                 // (same rule as the web page and the desktop panel, query-dsl.md "App verbs")
@@ -488,7 +513,9 @@ object QueryDsl {
                 val known = listOf("claude-live", "claude-archive", "tmux")
                 val keys = (via ?: "").lowercase().split(",").filter { it.isNotEmpty() }
                 val hit = known.filter { n -> keys.any { k -> if (known.any { it == k }) n == k else n.contains(k) } }
-                if (keys.isNotEmpty()) { ftsLive = ftsLive || "claude-live" in hit; ftsArchive = ftsArchive || "claude-archive" in hit } else { ftsLive = true; ftsArchive = true }
+                val hl = if (keys.isNotEmpty()) "claude-live" in hit else true
+                val ha = if (keys.isNotEmpty()) "claude-archive" in hit else true
+                if (ftsSeen) { ftsLive = ftsLive && hl; ftsArchive = ftsArchive && ha } else { ftsLive = hl; ftsArchive = ha; ftsSeen = true }
                 if (words.isNotEmpty()) filterTerms.add(FilterTerm(null, false, words.joinToString(" "), tok.neg, false, true))
                 idx = j
                 continue
@@ -540,7 +567,7 @@ object QueryDsl {
         }
 
         var rows = if (filterTerms.isEmpty()) all else all.filter { row -> filterTerms.all { it.matches(row) } }
-        if (ftsLive || ftsArchive) rows = rows.filter { if (it.isLive) ftsLive else ftsArchive }
+        if (ftsSeen) rows = rows.filter { if (it.isLive) ftsLive else ftsArchive }
 
         if (hasSort && !sortInert && sortChain != null) {
             val chain = sortChain
@@ -615,7 +642,32 @@ object QueryDsl {
             val frag = current.raw.substring(1).lowercase()
             // /bq is a command, not a pipeline stage: only the very first token of the query
             return ACTIVE_VERBS.filter { it.short.contains(frag) && (tokens.size == 1 || (it.short != "bq" && it.short != "dbq")) }
-                .map { Suggestion("/${it.short}", "/${it.long}", it.description, if (it.short == "bq" || it.short == "dbq") "/${it.short} " else "/${it.short}/") }
+                // /fv takes an open-ended value so its keys stay slash-glued; /s (closed vocabulary) takes its keys as the next token
+                .map { Suggestion("/${it.short}", "/${it.long}", it.description, if (it.short == "bq" || it.short == "dbq" || it.short == "s") "/${it.short} " else "/${it.short}/") }
+        }
+
+        // Stage 1b: the NEW-form keys / direction tokens of a bare `/s` (2026-11-21): `/s <keys>` and `/s <keys> <dir>`.
+        // The fragment is the plain token being typed (or empty after a trailing space).
+        run {
+            if (current != null && (current.isQuoted || current.neg || current.raw.startsWith("/"))) return@run
+            fun bareSort(t: Token?): Boolean {
+                if (t == null || t.isQuoted || t.neg) return false
+                val p = parseVerbToken(t) ?: return false
+                return p.verb == "s" && p.via == null && !p.bad
+            }
+            val before2: Token? = if (trailingSpace) tokens.getOrNull(tokens.size - 2) else tokens.getOrNull(tokens.size - 3)
+            val raw = current?.raw ?: ""
+            if (bareSort(lastComplete)) {
+                val frag = raw.substringAfterLast(',').lowercase()
+                val head = raw.substring(0, raw.length - frag.length)
+                return FIELD_INFO.filter { it.field.fieldName.contains(frag) }
+                    .map { fi -> Suggestion(fi.field.fieldName, null, fi.description, head + fi.field.fieldName) }
+            }
+            if (isKeysToken(lastComplete) && bareSort(before2)) {
+                val d = raw.lowercase()
+                return listOf("asc" to "ascending", "desc" to "descending").filter { it.second.startsWith(d) }
+                    .map { Suggestion(it.first, null, "", it.first + " ") }
+            }
         }
 
         // Stage 2: keys -- being typed after "/fv/", "//" or "/s/" (the fragment after the last comma),
