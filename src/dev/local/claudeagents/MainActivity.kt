@@ -398,7 +398,7 @@ class MainActivity : Activity() {
 
         // Same dir_key spelling as everywhere else in this app (see
         // ConversationColumns.accountNumber) -- the daemon's ACCOUNT_DIRS.
-        val accountKeys = listOf("claude", "claude2", "claude3", "claude4", "claude5", "claude6", "claude7", "claude8")
+        val accountKeys = listOf("claude", "claude2", "claude3", "claude4", "claude5", "claude6", "claude7")
         var selected = 0
         val acctButtons = mutableListOf<Button>()
         fun restyle() {
@@ -587,7 +587,7 @@ class MainActivity : Activity() {
         // account launch points use (tmux new-session + claude under that
         // account's CLAUDE_CONFIG_DIR), via the daemon's existing
         // spawn_session()/POST /api/v1/spawn (asked for explicitly: "add
-        // options to spawn new claude1/claude2/claude3/claude4/claude5/claude6/claude7/claude8 sessions via the
+        // options to spawn new claude1/claude2/claude3/claude4/claude5/claude6/claude7 sessions via the
         // same mechanism as in .shortcuts scripts" -- couldn't read those
         // scripts directly, phone unreachable this session, so this reuses
         // the daemon's own equivalent already-built primitive instead).
@@ -617,7 +617,7 @@ class MainActivity : Activity() {
             // with the last cached figures (plain names if none yet); a fresh
             // fetch updates the rows in place when it arrives, and a slow or
             // failed fetch (spotty connection) just leaves the cache showing.
-            val keys = listOf("claude", "claude2", "claude3", "claude4", "claude5", "claude6", "claude7", "claude8")
+            val keys = listOf("claude", "claude2", "claude3", "claude4", "claude5", "claude6", "claude7")
             val prefs = getSharedPreferences("usage_cache", MODE_PRIVATE)
             fun labelsFor(pct: Map<String, String>) = keys.mapIndexed { i, k -> "claude${i + 1}" + (pct[k]?.let { "   $it" } ?: "") }
             val cached = HashMap<String, String>()

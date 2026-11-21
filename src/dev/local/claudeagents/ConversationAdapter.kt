@@ -173,7 +173,7 @@ class ConversationAdapter(
         }
 
         val c = items[position]
-        val isKnownAccount = c.account in setOf("claude", "claude2", "claude3", "claude4", "claude5", "claude6", "claude7", "claude8")
+        val isKnownAccount = c.account in setOf("claude", "claude2", "claude3", "claude4", "claude5", "claude6", "claude7")
         holder.account.text = ConversationColumns.accountNumber(c.account)
         holder.account.setTextColor(if (isKnownAccount) Theme.onSurfaceVariant else Theme.muted and 0x66FFFFFF.toInt())
         holder.status?.let { sv ->
